@@ -1,0 +1,14 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/2375041369 → node/3713320059 on 2026-10-15 from 08:00:00
+1. 08:06:00 → 08:45:00, 3 ride(s)
+   08:06:00 Livada Poștei [node/2375041369] → 08:17:00 Terminal Gară [node/10198827064]  line 4 (trip 4_Mo-Fr_Tocile-TerminalGara_13)
+   08:23:00 Terminal Gară [node/10198827064] → 08:43:00 Tocile [node/3713320058]  line 4 (trip 4_Mo-Fr_TerminalGara-Tocile_18)
+   08:43:00 Tocile [node/3713320058] → 08:45:00 Piața Unirii [node/3713320059]  line 4 (trip 4_Mo-Fr_Tocile-TerminalGara_18)
+2. 08:00:00 → 08:36:00, 4 ride(s)
+   08:00:00 Livada Poștei [node/2375041369] → 08:05:00 Patria [node/262148563]  line 17 (trip 17_Mo-Fr_LivadaPostei-Noua_19)
+   08:13:00 Patria [node/262148563] → 08:15:00 Camera de Comerț [node/3652393631]  line 50 (trip 50_Mo-Fr_Solomon-CameradeComert_14)
+   08:19:00 Camera de Comerț [node/3652393631] → 08:34:00 Tocile [node/3713320058]  line 4 (trip 4_Mo-Fr_TerminalGara-Tocile_17)
+   08:34:00 Tocile [node/3713320058] → 08:36:00 Piața Unirii [node/3713320059]  line 4 (trip 4_Mo-Fr_Tocile-TerminalGara_17)

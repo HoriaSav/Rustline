@@ -1,0 +1,7 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/9183614613 → node/3652479577 on 2026-10-15 from 07:30:00
+1. 07:40:00 → 07:55:00, 1 ride(s)
+   07:40:00 Livada Poștei [node/9183614613] → 07:55:00 Tractorul [node/3652479577]  line 2 (trip 2_Mo-Fr_LivadaPostei-Rulmentul_5)

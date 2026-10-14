@@ -55,7 +55,7 @@ the GTFS stop_times count is 118 534.)
 
 ## Building a pack
 
-`rustline build-pack` turns a GTFS feed into a routing pack: `rustline-{feedId}-{sha12}-v2.rlp` (format version 2)
+`rustline build-pack` turns a GTFS feed into a routing pack: `rustline-{feedId}-{sha12}-v3.rlp` (format version 3)
 and the same file compressed as `.rlp.zst` (the loader accepts both). The header carries the
 SHA-256 of the feed zip, so an app can compare it with the backend's `current.sha256`.
 `--feed-id` defaults to the feed's file name. `--built-at <unix seconds>` (or `SOURCE_DATE_EPOCH`)
@@ -63,12 +63,32 @@ fixes the build time stored in the header, so the same feed always gives a byte-
 
 ```bash
 cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-manifest.zip --out out/ --feed-id myfeed --built-at 1700000000
-cargo run --locked --release -p rustline-cli -- inspect out/rustline-myfeed-*.rlp
+cargo run --locked --release -p rustline-cli -- inspect out/rustline-myfeed-627559bac2a3-v3.rlp
 cargo test --locked -p rustline-pack                     # round trip + bad-file tests on the fixture
 RUSTLINE_MANIFEST_FEED=fixtures/feeds/brasov-manifest.zip \
 cargo test --locked --release -p rustline-pack --test round_trip -- --ignored --nocapture   # real feed, all trips
 RUSTLINE_MANIFEST_FEED=fixtures/feeds/brasov-manifest.zip \
 cargo test --locked --release -p rustline-core --test engine -- --ignored --nocapture       # load time, median of 10
+```
+
+## Planning a journey (M3)
+
+`rustline plan` runs RAPTOR between two GTFS stop ids of a pack (no walking yet:
+changing between platforms needs a `transfers.txt` row until M4).
+
+```bash
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-myfeed-627559bac2a3-v3.rlp --from-stop node/3652436629 --to-stop node/3708889570 --at 2026-10-15T08:00
+cargo test --locked --release -p rustline-core --test m3_raptor -- --nocapture      # fixture and edge-case tests
+```
+
+The slow tests are `#[ignore = "slow: ..."]` (they need `fixtures/feeds/`). Run them with:
+
+```bash
+cargo test --locked --release -p rustline-core --test m3_raptor --test m3_budget -- --ignored --nocapture   # RAPTOR == CSA (1 000 queries × Brașov, Cluj, Timișoara) + MBTA time/memory
+```
+
+```bash
+cargo test --locked -p rustline-core --features oracle --test oracle_feature
 ```
 
 Test fixtures live in `data/fixtures/` (`tiny`: a clean feed; `broken`: one of
@@ -92,6 +112,26 @@ to **M5**, where Rustline gets its own lenient `stop_times`/`trips` reader (spec
    here for `inspect` and `build-pack`. Fix: own lenient reader (M5).
 6. **Duplicate stop_sequence** – not reported; the trip may show up as decreasing times.
    Fix: own reader (M5).
+
+## Known gaps (M3)
+7. **block_id** – stored in the pack but not used: staying seated from one trip to the
+   next of the same block counts as a transfer (2 rides). Test:
+   `block_id_is_treated_as_a_normal_transfer`.
+8. **transfers.txt** – rows with `from_trip_id`/`to_trip_id`/route ids are read as plain
+   stop-to-stop rows (gtfs-structures 0.48 drops those columns); types 4/5 (in-seat) are
+   skipped; a row naming an unknown stop makes the whole feed fail to load (same cause as #5).
+9. **Sibling platforms** – platforms of one station are linked only by transfers.txt
+   (Leader, M3 decision 8) until M4 footpaths. (A query from/to a parent station uses all
+   its platforms with 0 s access.)
+10. **One service day** – trips of the previous service day that run after midnight are
+    not seen (M5).
+
+(#11, "a self-transfer hides a walk", was fixed in the M3 review round by keeping ride and
+walk arrivals apart; its test `self_transfer_time_does_not_hide_a_faster_walk` now runs.)
+
+12. **max_results** – there is no `max_results` parameter yet (so no `max_results` = 0 case):
+    a query returns the whole Pareto set after the 5-minute rule, at most 9 journeys. It
+    arrives with `PlanRequest` in M4.
 
 ## Toolchain
 - Rust stable via rustup, pinned in `rust-toolchain.toml` (Android targets `aarch64-linux-android`, `x86_64-linux-android`).

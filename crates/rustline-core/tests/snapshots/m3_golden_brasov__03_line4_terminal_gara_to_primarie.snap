@@ -1,0 +1,7 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/10198827064 → node/2552635273 on 2026-10-15 from 07:00:00
+1. 07:02:00 → 07:12:00, 1 ride(s)
+   07:02:00 Terminal Gară [node/10198827064] → 07:12:00 Primărie [node/2552635273]  line 4 (trip 4_Mo-Fr_TerminalGara-Tocile_9)

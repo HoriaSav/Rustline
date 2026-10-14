@@ -10,7 +10,16 @@ repository.workspace = true
 rustline-model = { path = "../rustline-model" }
 rustline-pack = { path = "../rustline-pack" }
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# Same error-enum helper the other crates use (already in Cargo.lock).
+thiserror = "2.0.21"
+
+[features]
+# A slow connection-scan router used only to check RAPTOR's answers.
+oracle = []
 
 [dev-dependencies]
 # Only for tests: builds a pack from a GTFS feed.
 rustline-gtfs = { path = "../rustline-gtfs" }
+# Golden journey snapshots (plan M3 decision 10); tests only.
+insta = "1.43"
+

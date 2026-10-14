@@ -1,7 +1,15 @@
-//! The journey planner engine. M2: opening a pack; RAPTOR and walking
-//! follow in M3 onward.
+//! The journey planner engine. M2: opening a pack; M3: RAPTOR stop to
+//! stop. Walking follows in M4.
 
 use std::path::Path;
+
+#[cfg(feature = "oracle")]
+pub mod oracle;
+mod raptor;
+
+pub use raptor::{
+    raptor_pareto, raptor_stop_to_stop, QueryError, MAX_TRANSFERS, MORE_RIDES_MIN_GAIN_SECS,
+};
 
 use rustline_pack::{read_pack, read_pack_with_limit, Pack, PackError};
 
@@ -68,10 +76,22 @@ impl Engine {
         &self.pack
     }
 
+    /// Journeys between two stops; see [`raptor_stop_to_stop`].
+    pub fn plan_stop_to_stop(
+        &self,
+        from: rustline_model::StopIdx,
+        to: rustline_model::StopIdx,
+        date: chrono::NaiveDate,
+        dep: rustline_model::Seconds,
+        max_transfers: u8,
+    ) -> Result<Vec<rustline_model::Journey>, QueryError> {
+        raptor_stop_to_stop(&self.pack, from, to, date, dep, max_transfers)
+    }
+
     /// Counts, sha and validity of the loaded pack.
     pub fn info(&self) -> PackInfo {
-        let m = &self.pack.meta;
-        let t = &self.pack.timetable;
+        let m = &self.pack.meta();
+        let t = &self.pack.timetable();
         PackInfo {
             feed_id: m.feed_id.clone(),
             feed_sha256: m.feed_sha256.iter().map(|b| format!("{b:02x}")).collect(),

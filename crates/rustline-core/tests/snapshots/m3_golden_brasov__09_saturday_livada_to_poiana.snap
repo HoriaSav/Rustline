@@ -1,0 +1,7 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/3652436629 → node/3708889570 on 2026-10-17 from 09:00:00
+1. 09:00:00 → 09:25:00, 1 ride(s)
+   09:00:00 Livada Poștei [node/3652436629] → 09:25:00 Poiana Brașov [node/3708889570]  line 20 (trip 20_Sa-Su_LivadaPostei-PoianaBrasov_8)

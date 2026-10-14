@@ -15,7 +15,9 @@ use gtfs_structures::{ExactTimes, Exception, LocationType, RouteType};
 use rustline_model::{LatLon, PatternIdx, RouteIdx, Seconds, ServiceIdx, StopIdx, TripIdx};
 
 use crate::report::ReportBuilder;
-use crate::timetable::{Pattern, Route, Service, Stop, StopKind, StopTime, Timetable, Trip};
+use crate::timetable::{
+    Pattern, Route, Service, Stop, StopKind, StopTime, Timetable, Transfer, Trip,
+};
 use crate::{GtfsError, IssueKind, RawFeed, ValidationReport};
 
 /// Normalises, validates and builds patterns for a feed.
@@ -62,6 +64,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
                 stop_times: start..stop_times.len() as u32,
                 pattern: PatternIdx(u32::MAX), // set by build_patterns
                 approximate,
+                block_id: raw.block_id.clone().unwrap_or_default(),
             });
         };
         if raw.frequencies.is_empty() {
@@ -105,12 +108,57 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
         stop_times,
         services,
         patterns: Vec::new(),
+        transfers: build_transfers(feed, &stop_idx),
         timezone,
         valid_from,
         valid_to,
     };
     build_patterns(&mut tt, &mut report);
     Ok((tt, report.finish()))
+}
+
+/// GTFS pickup/drop-off type as its number; unknown values count as regular (0).
+fn pickup_drop_off(t: gtfs_structures::PickupDropOffType) -> u8 {
+    use gtfs_structures::PickupDropOffType::*;
+    match t {
+        Regular | Unknown(_) => 0,
+        NotAvailable => 1,
+        ArrangeByPhone => 2,
+        CoordinateWithDriver => 3,
+    }
+}
+
+/// transfers.txt rows whose both stops exist, sorted by (from, to).
+/// Types other than 0–3 (e.g. in-seat transfers) are left out for now.
+fn build_transfers(feed: &RawFeed, stop_idx: &HashMap<&str, StopIdx>) -> Vec<Transfer> {
+    use gtfs_structures::TransferType::*;
+    let mut out = Vec::new();
+    for (from_id, stop) in &feed.gtfs.stops {
+        let Some(&from) = stop_idx.get(from_id.as_str()) else {
+            continue;
+        };
+        for t in &stop.transfers {
+            let Some(&to) = stop_idx.get(t.to_stop_id.as_str()) else {
+                continue;
+            };
+            let kind = match t.transfer_type {
+                Recommended => 0,
+                Timed => 1,
+                MinTime => 2,
+                Impossible => 3,
+                _ => continue,
+            };
+            out.push(Transfer {
+                from,
+                to,
+                kind,
+                min_secs: t.min_transfer_time.unwrap_or(0),
+            });
+        }
+    }
+    out.sort();
+    out.dedup_by_key(|t| (t.from, t.to));
+    out
 }
 
 /// Stops sorted by id, plus an id → index lookup used during the build.
@@ -335,6 +383,8 @@ fn trip_times(
             stop,
             arrival: Seconds(arr),
             departure: Seconds(dep),
+            pickup: pickup_drop_off(st.pickup_type),
+            drop_off: pickup_drop_off(st.drop_off_type),
         });
     }
     if interpolated > 0 {

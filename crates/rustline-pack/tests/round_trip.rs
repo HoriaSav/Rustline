@@ -45,16 +45,16 @@ fn is_corrupt(r: Result<Pack, PackError>) -> bool {
 
 /// Every count equal, and **every** trip has the same stops and times.
 fn assert_same(tt: &Timetable, pack: &Pack) {
-    let t = &pack.timetable;
+    let t = &pack.timetable();
     assert_eq!(t.stop_count(), tt.stops.len());
     assert_eq!(t.route_ids.len(), tt.routes.len());
     assert_eq!(t.trip_count(), tt.trips.len());
     assert_eq!(t.stop_time_count(), tt.stop_times.len());
     assert_eq!(t.pattern_count(), tt.patterns.len());
     assert_eq!(t.service_ids.len(), tt.services.len());
-    assert_eq!(pack.meta.timezone, tt.timezone);
-    assert_eq!(pack.meta.valid_from, tt.valid_from);
-    assert_eq!(pack.meta.valid_to, tt.valid_to);
+    assert_eq!(pack.meta().timezone, tt.timezone);
+    assert_eq!(pack.meta().valid_from, tt.valid_from);
+    assert_eq!(pack.meta().valid_to, tt.valid_to);
 
     for (i, trip) in tt.trips.iter().enumerate() {
         let expected: Vec<(u32, u32, u32)> = tt
@@ -81,8 +81,8 @@ fn assert_same(tt: &Timetable, pack: &Pack) {
 fn tiny_fixture_round_trips() {
     let (tt, data, meta) = tiny();
     let pack = read_pack(&to_bytes(&data, &meta)).unwrap();
-    assert_eq!(pack.meta, meta);
-    assert_eq!(pack.timetable, data);
+    assert_eq!(pack.meta(), &meta);
+    assert_eq!(pack.timetable(), &data);
     assert_same(&tt, &pack);
 }
 
@@ -91,8 +91,8 @@ fn compressed_pack_round_trips() {
     let (_, data, meta) = tiny();
     let zst = zstd::encode_all(&to_bytes(&data, &meta)[..], 3).unwrap();
     let pack = read_pack(&zst).unwrap();
-    assert_eq!(pack.timetable, data);
-    assert_eq!(pack.meta, meta);
+    assert_eq!(pack.timetable(), &data);
+    assert_eq!(pack.meta(), &meta);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn unaligned_input_still_loads() {
     let mut shifted = vec![0u8];
     shifted.extend_from_slice(&bytes);
     let pack = read_pack(&shifted[1..]).unwrap();
-    assert_eq!(pack.timetable, tiny().1);
+    assert_eq!(pack.timetable(), &tiny().1);
 }
 
 // ---- small hand-written feeds -------------------------------------------------
@@ -167,10 +167,10 @@ fn one_stop_one_trip_with_non_ascii_names_round_trips() {
     assert_eq!((tt.stops.len(), tt.trips.len()), (1, 1));
     let pack = read_pack(&to_bytes(&data, &meta)).unwrap();
     assert_same(&tt, &pack);
-    assert_eq!(pack.timetable.stop_names[0], "Piața Sfatului ✨");
-    assert_eq!(pack.timetable.route_short_names[0], "Ș1");
-    assert_eq!(pack.timetable.route_long_names[0], "Țară 🚌");
-    assert_eq!(pack.timetable.trip_headsigns[0], "Ștrand 🏖");
+    assert_eq!(pack.timetable().stop_names[0], "Piața Sfatului ✨");
+    assert_eq!(pack.timetable().route_short_names[0], "Ș1");
+    assert_eq!(pack.timetable().route_long_names[0], "Țară 🚌");
+    assert_eq!(pack.timetable().trip_headsigns[0], "Ștrand 🏖");
 }
 
 // ---- bad files ----------------------------------------------------------------
@@ -185,14 +185,14 @@ fn bad_magic_is_rejected() {
 }
 
 #[test]
-fn version_0_1_and_99_are_rejected() {
+fn old_and_unknown_versions_are_rejected() {
     // The CRC no longer matches either, but the version is checked first.
-    for v in [0u16, 1, 99] {
+    for v in [0u16, 1, 2, 99] {
         let mut bytes = tiny_bytes();
         bytes[4..6].copy_from_slice(&v.to_le_bytes());
         assert!(matches!(
             read_pack(&bytes),
-            Err(PackError::UnsupportedVersion { found, supported: 2 }) if found == v
+            Err(PackError::UnsupportedVersion { found, supported: 3 }) if found == v
         ));
     }
 }
@@ -317,11 +317,11 @@ fn ten_thousand_random_mutations_never_panic() {
             // its own value can still load.
             assert_eq!(bad, bytes, "a changed file loaded");
             loaded += 1;
-            for t in 0..pack.timetable.trip_count() {
-                let _ = pack.timetable.trip_times(t);
+            for t in 0..pack.timetable().trip_count() {
+                let _ = pack.timetable().trip_times(t);
             }
-            for s in 0..pack.timetable.stop_count() {
-                let _ = pack.timetable.stop_pos(s);
+            for s in 0..pack.timetable().stop_count() {
+                let _ = pack.timetable().stop_pos(s);
             }
         }
     }
@@ -345,8 +345,8 @@ fn real_feed_round_trips() {
     let load = t0.elapsed();
     let from_zst = read_pack(&zst).unwrap();
 
-    assert_eq!(pack.timetable, data);
-    assert_eq!(from_zst.timetable, data);
+    assert_eq!(pack.timetable(), &data);
+    assert_eq!(from_zst.timetable(), &data);
     assert_same(&tt, &pack);
     println!(
         "{feed}: {} trips checked, pack {} bytes, zst {} bytes, load {load:?}",
@@ -477,4 +477,111 @@ fn accessors_never_panic_on_bad_indices() {
     assert!(data.pattern_stops(usize::MAX).is_empty());
     assert_eq!(data.stop_pos(usize::MAX), None);
     assert!(!data.service_runs(usize::MAX, 0));
+}
+
+// ---- format 3: pickup/drop-off, transfers.txt, block_id -----------------------
+
+#[test]
+fn pickup_transfers_and_blocks_round_trip() {
+    let feed = TempFeed::new(
+        "stop_id,stop_name,stop_lat,stop_lon\nA,A,1.0,1.0\nB,B,2.0,1.0\nC,C,3.0,1.0\n",
+        "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type\n\
+         T1,08:00:00,08:00:00,A,1,0,1\nT1,08:10:00,08:10:00,B,2,2,3\nT1,08:20:00,08:20:00,C,3,1,0\n",
+    );
+    fs::write(
+        feed.0.join("trips.txt"),
+        "route_id,service_id,trip_id,block_id\nR,S,T1,BLK\n",
+    )
+    .unwrap();
+    // (A row naming an unknown stop makes gtfs-structures reject the whole
+    // feed, see README Known gaps.)
+    fs::write(
+        feed.0.join("transfers.txt"),
+        "from_stop_id,to_stop_id,transfer_type,min_transfer_time\nB,C,2,90\nB,B,3,\nA,C,1,\n",
+    )
+    .unwrap();
+    let (_, data, meta) = build(&feed.0);
+    let pack = read_pack(&to_bytes(&data, &meta)).unwrap();
+    let t = &pack.timetable();
+    assert_eq!(t.trip_block_ids, ["BLK"]);
+    assert_eq!(t.stop_pickup, [0, 2, 1]);
+    assert_eq!(t.stop_drop_off, [1, 3, 0]);
+    assert_eq!(t.pickup_drop_off(1), (2, 3));
+    assert_eq!(t.pickup_drop_off(99), (0, 0));
+    assert_eq!(t.transfer_start, [0, 1, 3, 3]);
+    assert_eq!(t.transfer_to, [2, 1, 2]);
+    assert_eq!(t.transfer_type, [1, 3, 2]);
+    assert_eq!(t.transfer_secs, [0, 0, 90]);
+    assert_eq!(t.transfers(1), 1..3);
+    assert_eq!(t.transfers(usize::MAX), 0..0);
+}
+
+#[test]
+fn optional_format_3_arrays_may_be_empty() {
+    let (_, mut data, meta) = tiny();
+    data.stop_pickup.clear();
+    data.stop_drop_off.clear();
+    data.trip_block_ids.clear();
+    data.transfer_start.clear();
+    data.transfer_to.clear();
+    data.transfer_type.clear();
+    data.transfer_secs.clear();
+    let pack = read_pack(&to_bytes(&data, &meta)).unwrap();
+    assert_eq!(pack.timetable().pickup_drop_off(0), (0, 0));
+    assert_eq!(pack.timetable().transfers(0), 0..0);
+}
+
+#[test]
+fn bad_format_3_arrays_are_corrupt() {
+    assert_refused(|d| d.stop_pickup[0] = 4);
+    assert_refused(|d| d.stop_drop_off[0] = 200);
+    assert_refused(|d| {
+        d.stop_pickup.pop();
+    });
+    assert_refused(|d| d.trip_block_ids.push(String::new()));
+    assert_refused(|d| {
+        d.transfer_start.pop();
+    });
+    assert_refused(|d| {
+        d.transfer_start.clear();
+        d.transfer_to = vec![0];
+        d.transfer_type = vec![0];
+        d.transfer_secs = vec![0];
+    });
+    assert_refused(|d| {
+        let last = d.transfer_start.len() - 1;
+        d.transfer_start[last] += 1;
+        d.transfer_to.push(u32::MAX);
+        d.transfer_type.push(0);
+        d.transfer_secs.push(0);
+    });
+    assert_refused(|d| {
+        let last = d.transfer_start.len() - 1;
+        d.transfer_start[last] += 1;
+        d.transfer_to.push(0);
+        d.transfer_type.push(7);
+        d.transfer_secs.push(0);
+    });
+    assert_refused(|d| d.transfer_secs.push(1));
+}
+
+#[test]
+fn pack_new_checks_its_input() {
+    let (_, data, meta) = tiny();
+    assert!(Pack::new(meta.clone(), data.clone()).is_ok());
+    let mut bad = data.clone();
+    bad.pattern_stops[0] = u32::MAX - 1;
+    assert!(matches!(
+        Pack::new(meta.clone(), bad),
+        Err(PackError::Corrupt(_))
+    ));
+    let mut short = meta.clone();
+    short.valid_to = short.valid_from + chrono::Days::new(u64::from(data.service_words) * 64);
+    assert!(matches!(
+        Pack::new(short, data.clone()),
+        Err(PackError::Corrupt(_))
+    ));
+    let mut backwards = meta;
+    backwards.valid_to = backwards.valid_from - chrono::Days::new(1);
+    assert!(Pack::new(backwards, data).is_err());
 }

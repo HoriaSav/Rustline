@@ -49,15 +49,15 @@ fn runs(s: &rustline_gtfs::Service, d: chrono::NaiveDate) -> bool {
 
 /// Compares every field of the pack with the M1 timetable.
 fn assert_deep_equal(tt: &Timetable, pack: &Pack, meta: &PackMeta) {
-    assert_eq!(&pack.meta, meta);
-    assert_eq!(pack.meta.format_version, FORMAT_VERSION);
-    assert_eq!(pack.meta.osm_sha256, [0; 32]);
-    assert_eq!(pack.meta.timezone, tt.timezone);
+    assert_eq!(pack.meta(), meta);
+    assert_eq!(pack.meta().format_version, FORMAT_VERSION);
+    assert_eq!(pack.meta().osm_sha256, [0; 32]);
+    assert_eq!(pack.meta().timezone, tt.timezone);
     assert_eq!(
-        (pack.meta.valid_from, pack.meta.valid_to),
+        (pack.meta().valid_from, pack.meta().valid_to),
         (tt.valid_from, tt.valid_to)
     );
-    let t = &pack.timetable;
+    let t = &pack.timetable();
 
     assert_eq!(t.stop_count(), tt.stops.len(), "stops");
     for (i, s) in tt.stops.iter().enumerate() {
@@ -256,7 +256,7 @@ fn shuffled_csv_rows_give_the_same_pack() {
     let (_, b, mut meta_b) = build(&dir);
     // build() hashes the path into feed_sha256; neutralise that one field.
     let (tt_b, _, _) = build(&dir);
-    meta_b.feed_sha256 = read_pack(&a).unwrap().meta.feed_sha256;
+    meta_b.feed_sha256 = read_pack(&a).unwrap().meta().feed_sha256;
     let mut b2 = Vec::new();
     write_pack(
         &rustline_gtfs::try_timetable_data(&tt_b).unwrap(),
@@ -282,7 +282,7 @@ fn tiny_pack() -> (Vec<u8>, Pack) {
 
 /// Header length up to and including body_len.
 fn header_len(p: &Pack) -> usize {
-    4 + 2 + 32 + 32 + 8 + 4 + 4 + 2 + p.meta.timezone.len() + 2 + p.meta.feed_id.len() + 8
+    4 + 2 + 32 + 32 + 8 + 4 + 4 + 2 + p.meta().timezone.len() + 2 + p.meta().feed_id.len() + 8
 }
 
 #[test]
@@ -316,11 +316,11 @@ fn every_single_bit_flip_stats() {
                         changed_body += 1
                     }
                     // A pack that loads must be safe to use.
-                    for t in 0..p.timetable.trip_count() {
-                        let _ = p.timetable.trip_times(t);
+                    for t in 0..p.timetable().trip_count() {
+                        let _ = p.timetable().trip_times(t);
                     }
-                    for s in 0..p.timetable.stop_count() {
-                        let _ = p.timetable.stop_pos(s);
+                    for s in 0..p.timetable().stop_count() {
+                        let _ = p.timetable().stop_pos(s);
                     }
                 }
             }
@@ -426,7 +426,7 @@ fn structural_header_damage_gives_typed_errors() {
     b[0] = b'X';
     assert!(matches!(read_pack(&b), Err(PackError::BadMagic)));
 
-    for v in [0u16, 1, 3, 99, u16::MAX] {
+    for v in [0u16, 1, 2, 99, u16::MAX] {
         let mut b = bytes.clone();
         b[4..6].copy_from_slice(&v.to_le_bytes());
         assert!(

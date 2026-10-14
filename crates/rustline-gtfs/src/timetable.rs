@@ -66,6 +66,8 @@ pub struct Trip {
     pub pattern: PatternIdx,
     /// True for trips made from a headway-only (`exact_times=0`) frequency.
     pub approximate: bool,
+    /// `block_id` (empty when not given). Stored for later in-seat transfers.
+    pub block_id: String,
 }
 
 /// Arrival and departure of a trip at one stop.
@@ -77,6 +79,23 @@ pub struct StopTime {
     pub arrival: Seconds,
     /// Departure (≥ arrival).
     pub departure: Seconds,
+    /// GTFS `pickup_type`: 0 regular, 1 none, 2 phone, 3 ask the driver.
+    pub pickup: u8,
+    /// GTFS `drop_off_type`, same values as `pickup`.
+    pub drop_off: u8,
+}
+
+/// A row of transfers.txt between two known stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Transfer {
+    /// `from_stop_id`.
+    pub from: StopIdx,
+    /// `to_stop_id` (may equal `from`: the time needed to change at one stop).
+    pub to: StopIdx,
+    /// `transfer_type`: 0 recommended, 1 timed, 2 minimum time, 3 not possible.
+    pub kind: u8,
+    /// `min_transfer_time` in seconds (0 when empty).
+    pub min_secs: u32,
 }
 
 /// A calendar: weekly pattern plus added/removed dates.
@@ -121,6 +140,8 @@ pub struct Timetable {
     pub services: Vec<Service>,
     /// Stop patterns; see [`Pattern`].
     pub patterns: Vec<Pattern>,
+    /// transfers.txt rows between known stops, sorted by (from, to).
+    pub transfers: Vec<Transfer>,
     /// IANA timezone from `agency_timezone`, e.g. "America/New_York".
     pub timezone: String,
     /// First day any service runs.

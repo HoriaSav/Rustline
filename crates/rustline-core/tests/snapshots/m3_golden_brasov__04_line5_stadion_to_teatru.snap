@@ -1,0 +1,7 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/9275068611 → node/2655859050 on 2026-10-15 from 17:00:00
+1. 17:03:00 → 17:14:00, 1 ride(s)
+   17:03:00 Stadionul Municipal [node/9275068611] → 17:14:00 Teatrul Dramatic [node/2655859050]  line 5 (trip 5_Mo-Fr_StadionulMunicipal-Roman_82)

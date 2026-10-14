@@ -44,6 +44,7 @@ pub fn try_timetable_data(tt: &Timetable) -> Result<TimetableData, GtfsError> {
         data.trip_headsigns.push(t.headsign.clone());
         data.trip_approximate.push(u8::from(t.approximate));
         data.trip_pattern.push(t.pattern.0);
+        data.trip_block_ids.push(t.block_id.clone());
     }
 
     // Patterns, and their trips' times next to each other.
@@ -66,6 +67,8 @@ pub fn try_timetable_data(tt: &Timetable) -> Result<TimetableData, GtfsError> {
             for st in tt.trip_stop_times(trip) {
                 data.stop_times.push(st.arrival.0);
                 data.stop_times.push(st.departure.0);
+                data.stop_pickup.push(st.pickup);
+                data.stop_drop_off.push(st.drop_off);
             }
         }
     }
@@ -77,6 +80,19 @@ pub fn try_timetable_data(tt: &Timetable) -> Result<TimetableData, GtfsError> {
         data.stop_patterns.extend_from_slice(list);
     }
     data.stop_patterns_start.push(len_u32(&data.stop_patterns)?);
+
+    // transfers.txt, grouped by from-stop (tt.transfers is sorted).
+    let mut next = 0;
+    for s in 0..tt.stops.len() {
+        data.transfer_start.push(len_u32(&data.transfer_to)?);
+        while let Some(t) = tt.transfers.get(next).filter(|t| t.from.index() == s) {
+            data.transfer_to.push(t.to.0);
+            data.transfer_type.push(t.kind);
+            data.transfer_secs.push(t.min_secs);
+            next += 1;
+        }
+    }
+    data.transfer_start.push(len_u32(&data.transfer_to)?);
 
     // One bit per (service, day of the validity window).
     let days = (tt.valid_to - tt.valid_from).num_days() + 1;

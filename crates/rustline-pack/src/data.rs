@@ -53,6 +53,9 @@ pub struct TimetableData {
     pub trip_pattern: Vec<u32>,
     /// Where the trip's times start in `stop_times`.
     pub trip_times_start: Vec<u32>,
+    /// GTFS `block_id` of each trip ("" = none). Empty array = no blocks.
+    /// Stored for later; the router does not use blocks yet.
+    pub trip_block_ids: Vec<String>,
 
     // ---- patterns (CSR) ----
     /// Pattern p's stops are `pattern_stops[pattern_stops_start[p]..[p + 1]]`.
@@ -67,12 +70,28 @@ pub struct TimetableData {
     /// Ordered pattern by pattern, trip by trip, so one pattern's times are
     /// next to each other in memory (what RAPTOR scans).
     pub stop_times: Vec<u32>,
+    /// `pickup_type` (0–3) of each stop time, in `stop_times` order (entry
+    /// `i` belongs to `stop_times[2 * i]`). Empty array = all regular.
+    pub stop_pickup: Vec<u8>,
+    /// `drop_off_type` (0–3), like `stop_pickup`.
+    pub stop_drop_off: Vec<u8>,
 
     // ---- which patterns serve each stop (CSR) ----
     /// Stop s's patterns are `stop_patterns[stop_patterns_start[s]..[s + 1]]`.
     pub stop_patterns_start: Vec<u32>,
     /// Pattern indices.
     pub stop_patterns: Vec<u32>,
+
+    // ---- transfers.txt (CSR by from-stop, sorted by to-stop) ----
+    /// Stop s's transfers are `transfer_to[transfer_start[s]..[s + 1]]`.
+    /// Empty array = no transfers.
+    pub transfer_start: Vec<u32>,
+    /// Destination stop.
+    pub transfer_to: Vec<u32>,
+    /// `transfer_type`: 0 recommended, 1 timed, 2 minimum time, 3 not possible.
+    pub transfer_type: Vec<u8>,
+    /// `min_transfer_time` in seconds (0 when not given).
+    pub transfer_secs: Vec<u32>,
 
     // ---- services ----
     /// GTFS `service_id`.
@@ -147,6 +166,27 @@ impl TimetableData {
             }
         }
         times
+    }
+
+    /// `(pickup_type, drop_off_type)` of stop time `i` (`stop_times[2 * i]`);
+    /// `(0, 0)` when the pack has none or `i` is out of range.
+    pub fn pickup_drop_off(&self, i: usize) -> (u8, u8) {
+        (
+            self.stop_pickup.get(i).copied().unwrap_or(0),
+            self.stop_drop_off.get(i).copied().unwrap_or(0),
+        )
+    }
+
+    /// Range of `stop`'s transfers in `transfer_to`/`_type`/`_secs`
+    /// (empty if there are none or `stop` is out of range).
+    pub fn transfers(&self, stop: usize) -> std::ops::Range<usize> {
+        match (
+            self.transfer_start.get(stop),
+            self.transfer_start.get(stop.wrapping_add(1)),
+        ) {
+            (Some(&s), Some(&e)) if s <= e => s as usize..e as usize,
+            _ => 0..0,
+        }
     }
 
     /// True when service `service` runs on day number `day` (0 = `valid_from`).
@@ -231,6 +271,52 @@ impl TimetableData {
             false,
         )?;
         all_below("trip_pattern", &self.trip_pattern, patterns, false)?;
+        // Optional arrays (added in format 3): empty, or one entry per item.
+        let optional = |name: &str, len: usize, want: usize| {
+            if len == 0 {
+                Ok(())
+            } else {
+                same(name, len, want)
+            }
+        };
+        optional("trip_block_ids", self.trip_block_ids.len(), trips)?;
+        let times = self.stop_times.len() / 2;
+        optional("stop_pickup", self.stop_pickup.len(), times)?;
+        optional("stop_drop_off", self.stop_drop_off.len(), times)?;
+        for (name, v) in [
+            ("stop_pickup", &self.stop_pickup),
+            ("stop_drop_off", &self.stop_drop_off),
+        ] {
+            if let Some(x) = v.iter().find(|&&x| x > 3) {
+                return Err(format!("{name}: unknown value {x}"));
+            }
+        }
+        if self.transfer_start.is_empty() {
+            if !self.transfer_to.is_empty() {
+                return Err("transfer_to without transfer_start".to_string());
+            }
+        } else {
+            same("transfer_start", self.transfer_start.len(), stops + 1)?;
+            check_csr(
+                "transfer_to",
+                &self.transfer_start,
+                &self.transfer_to,
+                stops,
+            )?;
+        }
+        same(
+            "transfer_type",
+            self.transfer_type.len(),
+            self.transfer_to.len(),
+        )?;
+        same(
+            "transfer_secs",
+            self.transfer_secs.len(),
+            self.transfer_to.len(),
+        )?;
+        if let Some(k) = self.transfer_type.iter().find(|&&k| k > 3) {
+            return Err(format!("transfer_type: unknown value {k}"));
+        }
         if let Some(k) = self.stop_kind.iter().find(|&&k| k > 2) {
             return Err(format!("stop_kind: unknown value {k}"));
         }

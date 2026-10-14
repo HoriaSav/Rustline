@@ -5,8 +5,10 @@
 
 pub mod geo;
 pub mod ids;
+pub mod journey;
 pub mod time;
 
 pub use geo::LatLon;
 pub use ids::{PatternIdx, RouteIdx, ServiceIdx, StopIdx, TripIdx};
+pub use journey::{Journey, Leg};
 pub use time::{parse_gtfs_time, Seconds, TimeError};

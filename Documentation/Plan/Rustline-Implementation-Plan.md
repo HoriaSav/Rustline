@@ -59,7 +59,11 @@ scripts/fetch-fixtures.sh --verify   # verify only, no network
 - Every bot uses these files for the multi-feed check and real-feed tests (e.g. `RUSTLINE_MANIFEST_FEED=fixtures/feeds/brasov-manifest.zip`). Never download a feed ad hoc into `/tmp` or `data/raw/`.
 - Changing the set (new feed, newer version) is a deliberate change: update the manifest (sha256, bytes, date) and mention it in the hand-over report.
 
-**4. Progress note (Leader, after each approved milestone)**
+**4. Bug classes feed forward (Leader, whenever Tester or Reviewer finds a bug)**
+- When a finding is a *class* of bug (not a one-off typo), Leader adds it to the **Builder checklist** (usually §11) or to the **Edge cases (must be tested)** list of every later milestone it can affect, in the same round the fix is requested.
+- The hand-over report names which checklist/edge-case lines were added. *Why:* M1/M2 found the same kind of bug twice (sizing memory from an untrusted header); the second time should have been impossible.
+
+**5. Progress note (Leader, after each approved milestone)**
 - Leader adds a 2–3 line entry to the Obsidian note `Projects/Rustline/Progress.md`: what was done (with the commit hash), issues found in testing/review, and what's next.
 
 ### Builder checklist (applies to every milestone)
@@ -122,6 +126,21 @@ All six come from the shared set in `fixtures/feeds/` (see **Loop process** step
 
 **10. Scope**
 - Do only this milestone. Stage nothing, commit nothing; Savin commits after review. Don't edit unrelated files.
+
+**11. Untrusted input and resource safety**
+
+Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-only overflow). Treat every pack, GTFS zip, OSM file, CLI argument, FFI call and HTTP body as hostile.
+- **Never size an allocation from an untrusted length.** No `resize`/`with_capacity`/`vec![0; n]` with `n` from a file or request. Check `n` against a cap (and against the file's actual size) first, then grow incrementally (≈ 1 MiB chunks) or use `try_reserve` and turn failure into an error.
+- **Every read and decompression has a size cap**, configurable, with a phone-safe default of **256 MiB**, checked *before* the work (declared zstd content size, header lengths, zip entry sizes, OSM blob sizes).
+- **Every persisted artefact has an integrity checksum** (pack CRC trailer + zstd frame checksum, and the same for any new section or file). The format version is checked first and gives a clear `UnsupportedVersion`, not a checksum error.
+- **No panics on any input:** no `unwrap`/`expect`/`[i]` indexing/`as` casts on data-derived values. Use `get()`, `checked_*`/`saturating_*`, `try_from`. Public APIs return `Result`. Fuzz/mutation tests (bit flips, truncation, random bytes, huge lengths) run in **both debug and release**.
+- **Bound time as well as memory.** No loop, search or recursion whose length comes from crafted input without a cap (rounds, Dijkstra settled nodes, label bags, reconstruction length, retries). Each milestone states its time and memory budget and tests a hostile input against it.
+- **Measure peak RSS** (`/usr/bin/time -v`) on the largest feed (MBTA) *and* on the hostile inputs; record both in the report.
+- **Docs commands run verbatim** from `fixtures/feeds/`, with explicit output paths (no `out/*.rlp` globs that can match two files).
+- **Licence/attribution** recorded in `fixtures/manifest.tsv` for every feed and OSM extract; anything shown to users carries the attribution.
+- **Reproducible output:** same inputs + `SOURCE_DATE_EPOCH` → byte-identical artefacts; no `HashMap` order, paths, hostnames or local time in the output.
+- **Types that passed validation must not expose mutable internals** (no pub fields or `DerefMut` on validated data).
+- **Algorithms with several arrival kinds (ride/walk) must keep separate labels**; test with an oracle on the largest feed across several seeds.
 
 ### Milestone overview
 
@@ -406,7 +425,7 @@ pub struct TimetableData {
 ### How to check it works
 ```bash
 cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-manifest.zip --out out/
-cargo run --locked --release -p rustline-cli -- inspect out/rustline-*.rlp
+cargo run --locked --release -p rustline-cli -- inspect out/rustline-brasov-manifest-627559bac2a3-v3.rlp
 cargo test --locked -p rustline-pack       # round-trip: build → write → read → same counts + 20 sample trips identical
 /usr/bin/ls -lh out/
 ```
@@ -506,6 +525,7 @@ enum Label { Ride { trip: TripIdx, board_stop: StopIdx, board_pos: u16 }, Walk {
   1. collect patterns serving marked stops (remember earliest marked position per pattern);
   2. for each pattern walk along its stops: if you're "on" a trip, update arrival at this stop if better; check whether an earlier trip can be caught here (`earliest_trip(pattern, pos, time)` — binary search on departures, skip inactive services);
   3. relax footpaths (in M3: only `transfers.txt` or none; real footpaths in M4);
+     *Transfer rule (Leader, M3 decision 8):* changing trips at the same stop takes 0 s plus that stop's own `transfers.txt` row (`X → X`, `min_transfer_time`) if there is one. The spec says nothing about sibling platforms of one parent station, so in M3 they are linked **only** by a `transfers.txt` row; without one there is no transfer between them until the M4 footpaths.
   4. stop when nothing is marked.
 - *Why:* round k = journeys with k rides, so you get the arrival × transfers Pareto set for free.
 
@@ -515,6 +535,7 @@ enum Label { Ride { trip: TripIdx, board_stop: StopIdx, board_pos: u16 }, Walk {
 
 **7. Ranking (first version)**
 - *How:* keep per-round results, drop one with an extra ride unless ≥ 5 min earlier (`transfer_penalty`), cap `max_results`.
+  *Note (M3 review MF2):* M3 has no `max_results` parameter; the result is the whole Pareto set after the 5-minute rule (at most 9 journeys). `max_results` (including `max_results` = 0) arrives with `PlanRequest` in M4 and is tested there.
 
 **8. CSA oracle (`tests/` or `transit/csa.rs` under `#[cfg(test)]` / feature `oracle`)**
 - *How:* sort all connections (one trip hop) by departure, scan once, earliest arrival only. ~60 lines.
@@ -526,9 +547,11 @@ enum Label { Ride { trip: TripIdx, board_stop: StopIdx, board_pos: u16 }, Walk {
 ### How to check it works
 ```bash
 cargo test --locked -p rustline-core                       # fixture tests: direct ride, one transfer, unreachable
-cargo test --locked -p rustline-core --features oracle     # RAPTOR == CSA on 1 000 random queries
+cargo test --locked -p rustline-core --features oracle     # the oracle feature's CSA agrees with RAPTOR (tiny + 300 Brașov queries)
+cargo test --locked --release -p rustline-core --test m3_raptor --test m3_budget -- --ignored --nocapture   # RAPTOR == CSA on 1 000 random queries per feed + MBTA budget (slow, ignored by default)
 cargo insta review                                # approve golden outputs once
-cargo run --locked --release -p rustline-cli -- plan --pack out/*.rlp --from-stop … --to-stop … --at 2026-10-15T08:00
+cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-manifest.zip --out out/ --feed-id brasov
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-627559bac2a3-v3.rlp --from-stop node/3652436629 --to-stop node/3708889570 --at 2026-10-15T08:00
 ```
 
 ### Done when
@@ -558,12 +581,41 @@ pub fn raptor_stop_to_stop(tt: &Timetable, from: StopIdx, to: StopIdx, date: Nai
 - [ ] 10 golden Brașov queries checked by hand against the RATBV timetable; who/when checked is noted in the test file. Uses `insta`; snapshot files committed.
 - [ ] Plan CLI: `rustline plan --pack <rlp> --from-stop <gtfs_stop_id> --to-stop <id> --at <ISO>`; unknown stop id → clear error, exit code ≠ 0, no panic.
 - [ ] Release timing for the 1 000 queries (median/p95) printed and noted in the report (target comes in M5).
+- [ ] Safety (Builder checklist §11): `raptor_stop_to_stop` and `plan` never panic on any `StopIdx`/`TripIdx`/time from input; out-of-range index → error or empty result. Query memory is `O(stops × rounds)` allocated once per query, never sized from a pack field without the CSR check from M2.
+- [ ] Bounded work: rounds ≤ `max_transfers + 1` (hard cap, e.g. 8, even if the caller asks for more); every loop over trips/patterns/stops terminates on a crafted pack (cycle in `back` pointers → reconstruction stops after `rounds` legs and returns an error, not an infinite loop).
+- [ ] Budgets measured in release: MBTA 1 000 random queries p95 and peak RSS recorded; no single query > 1 s on MBTA; peak RSS of the query state ≤ 64 MiB on MBTA.
+- [ ] All items in **Edge cases (must be tested)** below have a test (or a Known gap with the milestone that fixes it).
 
 **Edge cases to test**
 - Unknown stop id; stop with no patterns; departure time after the last trip of the day (empty result).
 - Trip that visits the same stop twice (loop route).
 - Two trips with equal departure; `max_transfers = 0`.
 - Boarding at the stop you just alighted from in the same round.
+
+**Edge cases (must be tested)**
+*Query input*
+- Origin == destination (zero legs, not an error); unknown/out-of-range `StopIdx` or GTFS stop id; empty pack (0 stops) and a pack with 1 stop.
+- `dep` = 0, 23:59:59, ≥ 24:00:00, ≥ 48:00:00 and `u32::MAX - 1` → no overflow, no panic (saturating/checked).
+- `max_transfers` = 0, 1, and 255 (clamped to the hard cap); `max_results` = 0.
+- Date outside the feed's calendar; date where no service is active; feed with an empty calendar (only calendar_dates) and a calendar_dates-only feed.
+
+*Timetable shape*
+- Stop with no departures (only arrivals, or no patterns at all); stop served only by `pickup_type=1` or only by `drop_off_type=1` trips.
+- Departure after the last trip of the day → empty result; destination unreachable (separate component of the network) → empty result.
+- Two trips on the same pattern with identical times (tie in `earliest_trip`); overtaking trips are impossible within a pattern (M1 splits them) — assert it.
+- Loop route visiting the same stop twice; very long trip (≥ 200 stops, ≥ 24 h span); trip with all `stop_times` at the same second (zero-duration hops).
+- Parent stations: query from a station (`location_type=1`) resolves to its platforms, or returns a clear error; platform → sibling platform via the parent.
+- `transfers.txt` absent; present with type 2 and `min_transfer_time` 0 (zero-length transfer) and very large; transfer from a stop to itself.
+- Block/in-seat transfers (`block_id`): out of scope in M3 — assert they are treated as normal transfers and list it as a Known gap if the feed uses them.
+
+*Results*
+- Pareto ties: two journeys with equal arrival and equal rides → exactly one kept, chosen deterministically (lowest trip index).
+- A journey with more rides that is ≥ 5 min earlier is kept; < 5 min earlier is dropped.
+- Reconstruction on a crafted `back` cycle stops with an error, no hang.
+- Result identical across 2 runs and between debug and release builds.
+
+*Resources*
+- MBTA query: time and peak RSS recorded; 10 000 random queries on Brașov in release → no panic, no single query > 100 ms.
 
 **Tester will check**
 - Commands verbatim; oracle on 3 feeds with a different seed than Builder's; golden snapshots stable on re-run.
@@ -634,7 +686,7 @@ osmium extract -b 25.45,45.58,25.72,45.72 data/raw/romania.osm.pbf -o data/raw/b
 ### How to check it works
 ```bash
 cargo run --locked --release -p rustline-cli -- build-pack --gtfs data/raw/brasov.zip --osm data/raw/brasov.osm.pbf --out out/
-cargo run --locked --release -p rustline-cli -- plan --pack out/*.rlp --from 45.6427,25.5887 --to 45.6579,25.6012 --at 2026-10-15T08:00 --geojson /tmp/j.geojson
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-627559bac2a3-v3.rlp --from 45.6427,25.5887 --to 45.6579,25.6012 --at 2026-10-15T08:00 --geojson /tmp/j.geojson
 cargo test --locked --workspace
 ```
 Open the GeoJSON in geojson.io and check the walking lines follow real streets.
@@ -668,12 +720,37 @@ pub enum PlanError { InvalidRequest(String), OutsideCoverage, NoRoute, DateOutsi
 - [ ] Footpaths are symmetric within 1 s on an undirected graph (test).
 - [ ] Pack v2 loads; v1 packs return `UnsupportedVersion`; pack without OSM uses the straight-line fallback and says so in `PackInfo`.
 - [ ] Release timing for 1 000 door-to-door queries on Brașov noted in the report.
+- [ ] Safety (§11): OSM reading capped (blob size, node/way counts vs a configurable limit); no allocation sized from PBF headers; new pack sections covered by the CRC; fuzzed `.osm.pbf` and v2 packs → no panic in debug and release.
+- [ ] Bounded work: one-to-many Dijkstra stops at `max_access_m`/`max_transfer_m` and at a hard settled-node cap; A\* direct walk capped (e.g. 10 km); budgets recorded: Brașov query p95, `build-pack --osm` peak RSS for Brașov and a large extract (București).
+- [ ] OSM licence (ODbL) and extract date recorded in `fixtures/manifest.tsv`; bbox comes from `rustline bbox`, never hard-coded.
+- [ ] All items in **Edge cases (must be tested)** below have a test or a Known gap.
 
 **Edge cases to test**
 - Zero-length edges, duplicate nodes, ways with one node, ways referencing missing nodes (skip + report, no panic).
 - `foot=no`, `access=private`, motorways excluded; `highway=steps` cost ×1.5.
 - Bbox that contains no streets; OSM file that is not a PBF → `OsmError`.
 - Points exactly on a node; on the antimeridian/poles in input → `InvalidRequest` or `OutsideCoverage`, no panic.
+
+**Edge cases (must be tested)**
+*Graph build*
+- Disconnected components: small island kept only if it contains a stop; stop on a dropped component → listed and still reachable by straight-line fallback or reported.
+- Missing or unknown `highway` tags, `foot=yes` on an otherwise excluded way, `foot=designated`, `access=no` + `foot=yes`.
+- One-way footways (`oneway=yes` on `highway=footway`, `oneway:foot`): pedestrians still walk both ways unless `oneway:foot=yes`; document the rule and test it.
+- `highway=steps` cost; elevation/`incline` ignored in v1 (stated, tested as ignored).
+- Empty extract, extract with no walkable ways, huge bbox (whole country) → within the memory cap or a clear error; PBF referencing nodes outside the extract.
+
+*Snapping and queries*
+- A == B (same point) → zero-length walk or empty itinerary, no error; A and B 1 m apart.
+- A or B outside the bbox, in water/a park far from any road (> 300 m) → `OutsideCoverage`; exactly at 300 m boundary.
+- Snapping to the nearest *edge* (mid-segment), not just the nearest node; point equidistant from two edges → deterministic choice.
+- Stops far from the graph (> 100 m) → reported, `Warning::StopNotLinkedToStreets`.
+- Walking-only trip (no stop within `max_access_m`); `max_access_m` = 0; max walk distance respected exactly at the boundary.
+- Footpath symmetry within 1 s; zero-length footpath between co-located stops.
+- Destination reachable only by walking from the last stop across a component boundary → no route or straight-line fallback, never a hang.
+
+*Resources*
+- Fuzzed PBF (truncated, bit-flipped, giant declared blob size) → `OsmError` under the cap, no OOM.
+- 1 000 random coordinate pairs incl. NaN/inf/garbage → no panic; per-query time ≤ 100 ms on Brașov release.
 
 **Tester will check**
 - Commands verbatim; GeoJSON of 3 queries opened and walking lines follow streets.
@@ -758,11 +835,31 @@ fn to_service_time(tz: Tz, t: DateTime<FixedOffset>) -> Vec<(NaiveDate, Seconds)
 - [ ] Property tests (spec §15) pass on Brașov with 1 000 cases and fixed seed; run via a documented `--test` name.
 - [ ] `criterion` bench: Brașov p50/p95 for 1 000 fixed queries; **PC p95 < 20 ms**; numbers + CPU model written into spec §12.
 - [ ] Every M1 Known gap is now fixed or explicitly moved to M8 with Savin's OK.
+- [ ] Safety (§11): searching D-1/D/D+1 at most triples the work (measured); time arithmetic with shifted days is checked (no wrap for times ≥ 48:00 or near `u32::MAX`); frequency expansion is capped (trips per frequency row and total) so a crafted `headway_secs=1` over 48 h cannot exhaust memory.
+- [ ] All items in **Edge cases (must be tested)** below have a test or a Known gap.
 
 **Edge cases to test**
 - Times ≥ 48:00:00; trip spanning midnight across a DST switch; a service active only on D-1.
 - Query exactly at 00:00:00 and 23:59:59; feed with a single service day.
 - Feed whose validity ends today / started tomorrow.
+
+**Edge cases (must be tested)**
+*Time and calendar*
+- Midnight crossing: 23:50 → 24:10, 00:20 → 24:10 via D-1; trip with times > 24:00 that also runs on D (same trip found twice → deduplicated).
+- Service days around DST: the night of 2026-10-25 (01:00–04:00 repeated hour) and 2027-03-28 (03:00–04:00 missing hour); a query at a non-existent wall time (03:30 on spring-forward) and an ambiguous one (03:30 on fall-back) → documented choice, no panic.
+- Query in a timezone other than the agency's (input `+00:00`, `-05:00`): converted correctly; output in the feed's zone. Multi-agency feed whose agencies declare different timezones → error or documented rule.
+- Calendar_dates-only feed; empty `calendar.txt`; service with `start_date > end_date`; type 2 removing a day the calendar never had; type 1 and type 2 on the same day.
+- Multi-day searches: query late on the last day of the feed; long searches that need D+1.
+
+*Frequencies and transfers*
+- `frequencies.txt` with `exact_times=0` and `1`, headway that doesn't divide the window, overlapping windows, window crossing midnight, `headway_secs=0` (reject).
+- `transfers.txt` types 0, 1, 2 (with `min_transfer_time` 0, missing, and very large), 3 (forbidden, including stop to itself); unknown type 4/5 → warning; trip-to-trip/route-to-route transfers (GTFS extension) → ignored with a warning if unsupported.
+- Blocks/in-seat transfers (`block_id`): implemented or explicitly a Known gap with a test.
+
+*Validity and resources*
+- `DateOutsideFeed` on the day before `valid_from` and the day after `valid_to`; `FeedExpiresSoon` at exactly 14 and 15 days.
+- Crafted frequency rows that would expand to > the trip cap → build error, peak RSS under the cap.
+- Bench reproduced on MBTA (non-Romanian timezone, largest feed): p95 and peak RSS recorded.
 
 **Tester will check**
 - All tests run with `TZ=UTC` and `TZ=Pacific/Auckland` set in the shell (result must not change).
@@ -861,10 +958,28 @@ Airplane mode on → plan a journey → it still works.
 - [ ] Pack freshness banner shows when sha differs (tested with a fake sha).
 - [ ] `android.yml` CI job (arm64 cross-build, `--locked`) green; OSM + feed attribution visible in the app.
 - [ ] RoTransit changes are on their own branch, nothing in RoTransit `main` touched.
+- [ ] Safety (§11): pack opened with the 256 MiB default cap (or lower, documented for the phone); decompression to disk checks free space first and writes to a temp file + atomic rename; no panic crosses FFI (tested with an injected panic in a debug-only hook → Dart exception, app alive).
+- [ ] Budgets on the A54: pack open time, peak memory of the app with the engine loaded, and memory during 100 queries recorded; a single query is cancellable or bounded (≤ 1 s).
+- [ ] All items in **Edge cases (must be tested)** below have a test or a Known gap.
 
 **Edge cases to test**
 - Engine opened twice / concurrently (provider rebuild); plan called while engine is loading.
 - Missing pack file; pack on a full disk during decompression; device clock in a different timezone than the feed.
+
+**Edge cases (must be tested)**
+*Lifecycle and concurrency*
+- `plan` called before the pack has loaded → typed error (or awaited), never a null deref.
+- Cancellation: user leaves the screen or starts a new query → old result discarded; the Rust call ends within its time bound.
+- Concurrent queries from two widgets / fast repeated taps → correct, no data race (`Engine` is `Send + Sync`, shared via `Arc`).
+- Pack swapped (new pack downloaded/decompressed) while a query runs → the running query finishes on the old `Arc`, the next uses the new one; half-written pack never opened.
+- App backgrounded and killed during decompression → next start detects the partial file and redoes it.
+
+*Platform and data*
+- Low memory on the phone: open with a lower cap and on an emulator with little RAM → clean error, no OOM kill during load.
+- Panics across the FFI boundary → Dart exception with a stable code; app keeps running.
+- String encoding: stop names with Romanian diacritics (ș, ț, ă), emoji, invalid UTF-8 in a feed → shown or replaced, no crash; empty and very long strings from Dart.
+- Android ABIs: arm64-v8a on the A54, x86_64 on the emulator; armeabi-v7a explicitly unsupported (app shows an error or the ABI is excluded from the APK).
+- Device timezone ≠ feed timezone, device clock wrong by a day; airplane mode; corrupt, truncated, v1 and zero-byte packs.
 
 **Tester will check**
 - Builds and integration test verbatim; FRB versions identical in all three places.
@@ -896,7 +1011,7 @@ Airplane mode on → plan a journey → it still works.
 
 ### How to check it works
 ```bash
-cargo run --locked --release -p rustline-server -- --pack out/*.rlp --port 8088
+cargo run --locked --release -p rustline-server -- --pack out/rustline-brasov-627559bac2a3-v3.rlp --port 8088
 curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
   -d '{"from":{"lat":45.6427,"lon":25.5887},"to":{"lat":45.6579,"lon":25.6012},"departAt":"2026-10-15T08:00:00+03:00"}' | jq
 ```
@@ -912,6 +1027,9 @@ curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
 - [ ] Test: for every golden query, server JSON == `Engine::plan` serialised (byte-equal).
 - [ ] Plan runs in `spawn_blocking`; 100 concurrent requests in a test complete without errors.
 - [ ] Deps (axum, tokio, schemars) satisfy MSRV 1.85 or the MSRV bump is agreed with Savin first.
+- [ ] Safety (§11): request body cap (e.g. 64 KiB), per-request time limit (plan in `spawn_blocking` with a timeout), concurrency limit; peak RSS under 100 concurrent requests on the MBTA pack recorded.
+- [ ] All items in **Edge cases (must be tested)** below have a test.
+- **Edge cases (must be tested):** empty body; body over the cap; wrong `content-type`; NaN/huge numbers in JSON; unknown fields; date string without offset; slow client (slowloris) → timeout; 100 concurrent requests; client disconnect mid-plan; pack file missing at startup → clear exit, not a panic; server and library answers byte-equal for the golden queries.
 - **Tester will check:** curl command verbatim, bad-input fuzz (empty, huge, wrong types), status codes, Docker build.
 
 ### Common pitfalls
@@ -946,6 +1064,8 @@ curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
 - [ ] McRAPTOR bags capped (cap documented); result sets are Pareto on (arrival, rides, walk) – property test.
 - [ ] Arrive-by: for 1 000 random queries, arrival ≤ requested time and no later departure exists with the same arrival bound (checked against brute force on a fixture).
 - [ ] Phone p95 re-measured after McRAPTOR and still < 150 ms, or the regression is reported.
+- [ ] Safety (§11): bag size, range-query window and number of departures per range are hard-capped; worst case (many ties on MBTA) measured for time and peak RSS.
+- **Edge cases (must be tested):** Pareto ties on all three criteria (deterministic pick); bag cap reached; arrive-by before the first trip / after midnight / across DST; arrive-by at origin == destination; range window of 0 s and of 24 h; range crossing midnight; depart-late pass never makes arrival later; walking weight 0.
 - **Tester will check:** M3–M5 property tests still pass; golden diffs reviewed one by one; phone timings.
 
 ### Common pitfalls
@@ -956,6 +1076,8 @@ curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
 ---
 
 ## M9 — Future (separate spec)
+
+**Edge cases to carry into the M9 spec:** downloaded packs are untrusted (size cap, checksum, version, signature or sha from `/api/feeds` checked before use); interrupted/resumed download; pack newer than the app supports; realtime updates for trips not in the pack, delays > 24 h, cancelled stops; stale realtime data; all Builder checklist §11 items apply.
 
 Not planned in detail; write a new spec when you get here ([spec §14](Rustline-Spec.md#14-realtime-future), [§17](Rustline-Spec.md#17-milestones)):
 - **Backend-served packs:** backend_v2 builds a pack when FeedService detects a new sha and serves `/api/feeds/{id}/routing-pack` with the same ETag logic; the app downloads it instead of waiting for an app update.

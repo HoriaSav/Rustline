@@ -20,6 +20,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10"
 # Compressing the pack to .rlp.zst (same crate rustline-pack reads it with).
 zstd = { version = "0.13", default-features = false }
+# Parsing --at for `plan` (same version the other crates use).
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "rustline"

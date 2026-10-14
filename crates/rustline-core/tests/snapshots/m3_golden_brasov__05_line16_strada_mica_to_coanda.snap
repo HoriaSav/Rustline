@@ -1,0 +1,7 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/12395944841 → node/3343778544 on 2026-10-15 from 06:00:00
+1. 06:05:00 → 06:15:00, 1 ride(s)
+   06:05:00 Cap Linie Strada Mică [node/12395944841] → 06:15:00 Academia Henri Coandă [node/3343778544]  line 16 (trip 16_Mo-Fr_CapLinieStradaMica-LivadaPostei_3)

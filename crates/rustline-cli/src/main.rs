@@ -3,6 +3,7 @@
 //! ```text
 //! rustline inspect <feed.zip|dir|pack.rlp|pack.rlp.zst> [--json]
 //! rustline build-pack --gtfs <feed.zip|dir> --out <dir> [--feed-id <id>] [--built-at <unix>]
+//! rustline plan --pack <pack> --from-stop <stop_id> --to-stop <stop_id> --at <YYYY-MM-DDTHH:MM[:SS]>
 //! ```
 
 use std::fs;
@@ -48,6 +49,25 @@ enum Command {
         /// then to now. Fix it to get byte-identical packs.
         #[arg(long)]
         built_at: Option<i64>,
+    },
+    /// Plan journeys between two stops of a pack (RAPTOR, no walking yet).
+    Plan {
+        /// A .rlp or .rlp.zst pack.
+        #[arg(long)]
+        pack: PathBuf,
+        /// GTFS stop_id to leave from.
+        #[arg(long)]
+        from_stop: String,
+        /// GTFS stop_id to go to.
+        #[arg(long)]
+        to_stop: String,
+        /// Service day and departure time, e.g. 2030-01-02T08:00 (times past
+        /// midnight belong to the next service day).
+        #[arg(long)]
+        at: String,
+        /// Most transfers to use (capped at 8).
+        #[arg(long, default_value_t = 8)]
+        max_transfers: u8,
     },
 }
 
@@ -102,6 +122,13 @@ fn run(cli: Cli) -> Result<()> {
             feed_id,
             built_at,
         } => build_pack(&gtfs, &out, feed_id, built_at)?,
+        Command::Plan {
+            pack,
+            from_stop,
+            to_stop,
+            at,
+            max_transfers,
+        } => plan(&pack, &from_stop, &to_stop, &at, max_transfers)?,
     }
     Ok(())
 }
@@ -256,6 +283,73 @@ fn inspect_pack(path: &Path, json: bool) -> Result<()> {
     println!("  services            {:>8}", i.services);
     println!();
     println!("load {load_ms} ms");
+    Ok(())
+}
+
+fn plan(path: &Path, from: &str, to: &str, at: &str, max_transfers: u8) -> Result<()> {
+    let at = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"]
+        .iter()
+        .find_map(|f| chrono::NaiveDateTime::parse_from_str(at, f).ok())
+        .with_context(|| format!("--at {at:?}: expected YYYY-MM-DDTHH:MM[:SS]"))?;
+    let engine =
+        rustline_core::Engine::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let tt = &engine.pack().timetable();
+    let stop = |id: &str| {
+        tt.stop_ids
+            .iter()
+            .position(|s| s == id)
+            .map(rustline_model::StopIdx::from_usize)
+            .with_context(|| format!("unknown stop id {id:?}"))
+    };
+    let (a, b) = (stop(from)?, stop(to)?);
+    let secs = chrono::Timelike::num_seconds_from_midnight(&at.time());
+    let dep = rustline_model::Seconds(secs);
+    let journeys = engine.plan_stop_to_stop(a, b, at.date(), dep, max_transfers)?;
+    let name = |s: rustline_model::StopIdx| {
+        let id = &tt.stop_ids[s.index()];
+        let n = &tt.stop_names[s.index()];
+        if n.is_empty() || n == id {
+            id.clone()
+        } else {
+            format!("{n} [{id}]")
+        }
+    };
+    println!("{} → {}, {} from {}", name(a), name(b), at.date(), dep);
+    if journeys.is_empty() {
+        println!("no journey found");
+    }
+    for (i, j) in journeys.iter().enumerate() {
+        println!();
+        println!("{}. {} → {}, {} ride(s)", i + 1, j.dep, j.arr, j.rides);
+        for leg in &j.legs {
+            match *leg {
+                rustline_model::Leg::Transit {
+                    route,
+                    trip,
+                    from,
+                    to,
+                    dep,
+                    arr,
+                } => {
+                    let r = &tt.route_short_names[route.index()];
+                    let r = if r.is_empty() {
+                        &tt.route_ids[route.index()]
+                    } else {
+                        r
+                    };
+                    println!(
+                        "   {dep} {} → {arr} {}  line {r} (trip {})",
+                        name(from),
+                        name(to),
+                        tt.trip_ids[trip.index()]
+                    );
+                }
+                rustline_model::Leg::Walk { from, to, secs } => {
+                    println!("   change {} → {} ({secs} s)", name(from), name(to));
+                }
+            }
+        }
+    }
     Ok(())
 }
 

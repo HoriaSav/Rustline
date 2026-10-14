@@ -1,0 +1,8 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/2375041371 → node/9214351438 on 2026-10-15 from 08:00:00
+1. 08:05:00 → 09:50:00, 2 ride(s)
+   08:05:00 Livada Poștei [node/2375041371] → 08:17:00 Vlahuță [node/3652436632]  line 1 (trip 1_Mo-Fr_LivadaPostei-Triaj_14)
+   09:18:00 Vlahuță [node/3652436632] → 09:50:00 Gara Mare [node/9214351438]  line 520 (trip 520_Mo-Fr_TerminalGara-LuncaCalniculuiVizaviu_7)

@@ -1,0 +1,9 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/3652393629 → node/9171470093 on 2026-10-15 from 08:00:00
+1. 08:04:00 → 10:03:00, 3 ride(s)
+   08:04:00 Autogara 3 [node/3652393629] → 08:14:00 Camera de Comerț [node/3652393631]  line 1 (trip 1_Mo-Fr_Triaj-LivadaPostei_16)
+   09:20:00 Camera de Comerț [node/3652393631] → 09:55:00 Telecabina [node/9171470095]  line 100 (trip 100_Mo-Fr_TerminalGara-Telecabina_1)
+   10:00:00 Telecabina [node/9171470095] → 10:03:00 Poiana Brașov [node/9171470093]  line 100 (trip 100_Mo-Fr_Telecabina-TerminalGara_1)

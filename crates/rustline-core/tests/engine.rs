@@ -27,9 +27,9 @@ fn info_matches_the_pack() {
     let engine = Engine::from_bytes(&pack_bytes(&workspace_path("data/fixtures/tiny"))).unwrap();
     let info = engine.info();
     assert_eq!(info.feed_sha256, "ab".repeat(32));
-    assert_eq!(info.format_version, 2);
+    assert_eq!(info.format_version, 3);
     assert_eq!(info.feed_id, "tiny");
-    assert_eq!(info.trips, engine.pack().timetable.trip_count());
+    assert_eq!(info.trips, engine.pack().timetable().trip_count());
     assert!(info.valid_from <= info.valid_to);
 }
 

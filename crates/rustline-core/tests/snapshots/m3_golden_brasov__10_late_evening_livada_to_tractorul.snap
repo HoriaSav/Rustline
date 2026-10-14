@@ -1,0 +1,9 @@
+---
+source: crates/rustline-core/tests/m3_golden_brasov.rs
+expression: text
+---
+node/9183614613 → node/3652479577 on 2026-10-15 from 23:30:00
+1. 23:30:00 → 24:06:00, 3 ride(s)
+   23:30:00 Livada Poștei [node/9183614613] → 23:32:00 Teatrul Dramatic [node/2655859050]  line 31 (trip 31_Mo-Fr_LivadaPostei-ValeaCetatii_78)
+   23:48:00 Teatrul Dramatic [node/2655859050] → 23:52:00 Toamnei [node/3701356197]  line 1 (trip 1_Mo-Fr_LivadaPostei-Triaj_87)
+   23:56:00 Toamnei [node/3701356197] → 24:06:00 Tractorul [node/3652479577]  line 7 (trip 7_Mo-Fr_Roman-Rulmentul_65)

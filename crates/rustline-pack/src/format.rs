@@ -12,7 +12,8 @@ use crate::{PackError, TimetableData};
 pub const MAGIC: [u8; 4] = *b"RLPK";
 /// The layout version this build writes and reads.
 /// v2 (M2 review): CRC32 trailer added.
-pub const FORMAT_VERSION: u16 = 2;
+/// v3 (M3): pickup/drop-off types, transfers.txt and block ids.
+pub const FORMAT_VERSION: u16 = 3;
 /// First four bytes of a zstd frame.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 /// Default limit for the pack body (256 MiB). A tiny `.rlp.zst` can claim to
@@ -42,13 +43,56 @@ pub struct PackMeta {
     pub feed_id: String,
 }
 
-/// A loaded pack.
+/// A checked pack: header plus timetable that fit together.
+///
+/// The fields are private and there is no `DerefMut`, so a `Pack` can only
+/// come from [`read_pack`] or [`Pack::new`], which both run
+/// [`TimetableData::check`]. The router relies on that.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pack {
+    meta: PackMeta,
+    timetable: TimetableData,
+}
+
+impl Pack {
+    /// Checks `timetable` (and that its service days cover the header's
+    /// validity window) and wraps it with `meta`.
+    pub fn new(meta: PackMeta, timetable: TimetableData) -> Result<Pack, PackError> {
+        timetable.check().map_err(PackError::Corrupt)?;
+        if meta.valid_to < meta.valid_from {
+            return Err(corrupt("valid_to is before valid_from"));
+        }
+        let days = (meta.valid_to - meta.valid_from).num_days() + 1;
+        if i64::from(timetable.service_words) * 64 < days {
+            return Err(corrupt(
+                "service bitsets are shorter than the validity window",
+            ));
+        }
+        Ok(Pack { meta, timetable })
+    }
+
     /// Header fields.
-    pub meta: PackMeta,
+    pub fn meta(&self) -> &PackMeta {
+        &self.meta
+    }
+
     /// The timetable.
-    pub timetable: TimetableData,
+    pub fn timetable(&self) -> &TimetableData {
+        &self.timetable
+    }
+
+    /// Gives back the header and the timetable (e.g. to change and re-check them).
+    pub fn into_parts(self) -> (PackMeta, TimetableData) {
+        (self.meta, self.timetable)
+    }
+}
+
+/// A pack can be used wherever its timetable is (`pack.stop_ids`, …).
+impl std::ops::Deref for Pack {
+    type Target = TimetableData;
+    fn deref(&self) -> &TimetableData {
+        &self.timetable
+    }
 }
 
 /// Writes a pack (uncompressed). Compress the bytes with zstd for `.rlp.zst`.
@@ -220,14 +264,7 @@ fn read_from(input: impl Read, max_body_bytes: u64, zstd: bool) -> Result<Pack, 
 
     let timetable = rkyv::from_bytes::<TimetableData, rancor::Error>(&body)
         .map_err(|e| PackError::Corrupt(format!("body: {e}")))?;
-    timetable.check().map_err(PackError::Corrupt)?;
-    let days = (meta.valid_to - meta.valid_from).num_days() + 1;
-    if i64::from(timetable.service_words) * 64 < days {
-        return Err(corrupt(
-            "service bitsets are shorter than the validity window",
-        ));
-    }
-    Ok(Pack { meta, timetable })
+    Pack::new(meta, timetable)
 }
 
 /// `read_exact`, with a short file reported as `Corrupt`.
