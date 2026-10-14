@@ -1,0 +1,7 @@
+route_id,service_id,trip_id
+R,S,one
+R,S,back
+R,NOPE,ghost
+NOROUTE,S,lost
+R,S,edge
+R,S,freq

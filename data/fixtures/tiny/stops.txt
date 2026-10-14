@@ -1,0 +1,6 @@
+stop_id,stop_name,stop_lat,stop_lon
+A,Alpha,10.0000,20.0000
+B,Bravo,10.0050,20.0000
+C,Charlie,10.0100,20.0050
+D,Delta,10.0150,20.0100
+E,Echo,10.0100,20.0150

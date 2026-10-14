@@ -93,7 +93,7 @@ Rustline answers one question: *"I am at point A at time T and want to get to po
 | Build complexity | Android NDK + iOS toolchains, FRB codegen | Plain Linux binary / Docker |
 | Privacy | Location never leaves phone | Server sees trips |
 
-**Recommendation:** **on-device first**, via flutter_rust_bridge 2.x (2.13.0 is current, released 2026‑08‑23, supports Android/iOS and has Android 16 KB page support via CargoKit — [release](https://github.com/fzyzcjy/flutter_rust_bridge/releases/tag/v2.13.0), [pub.dev](https://pub.dev/packages/flutter_rust_bridge)). Reason: the app is already offline-first, Brașov is small, and it removes dependency on the home server.
+**Recommendation:** **on-device first**, via flutter_rust_bridge 2.x, pinned to **2.12.0**. (2.13.0, released 2026‑08‑23, is the newest, but it requires Dart ≥ 3.9.2; RoTransit's Flutter is 3.27 / Dart 3.6, and 2.12.0 is the newest release that supports it (Dart ≥ 3.4). Move to 2.13+ together with a RoTransit Flutter upgrade — [releases](https://github.com/fzyzcjy/flutter_rust_bridge/releases), [pub.dev](https://pub.dev/packages/flutter_rust_bridge)). FRB supports Android/iOS via CargoKit. Reason: the app is already offline-first, Brașov is small, and it removes dependency on the home server.
 **Keep server possible:** the core is a pure library (`rustline-core`) with no FFI/HTTP code; a thin `rustline-server` crate (axum) can expose the same API as JSON. Used for: debugging, thesis demo, other cities that are too big for a phone, or a web client.
 
 Alternative considered: raw `dart:ffi` with a hand-written C ABI. Smaller dependency, but you would write and keep in sync all the glue by hand. FRB generates it. Keep raw FFI as fallback if FRB causes trouble.
@@ -401,7 +401,7 @@ gantt
 - GTFS Schedule reference: https://gtfs.org/documentation/schedule/reference/
 - `raptor` crate: https://crates.io/crates/raptor · `vulture` crate: https://github.com/urschrei/vulture
 - `gtfs-structures`: https://docs.rs/gtfs-structures · `osmpbf`: https://docs.rs/osmpbf · osm4routing2: https://github.com/Tristramg/osm4routing2
-- flutter_rust_bridge 2.13.0: https://github.com/fzyzcjy/flutter_rust_bridge/releases/tag/v2.13.0
+- flutter_rust_bridge 2.12.0 (pinned; 2.13 needs Dart 3.9): https://github.com/fzyzcjy/flutter_rust_bridge/releases/tag/v2.12.0
 - OpenTripPlanner: https://docs.opentripplanner.org/ · R5: https://github.com/conveyal/r5 · MOTIS: https://github.com/motis-project/motis · Transitous: https://transitous.org/ · Valhalla: https://github.com/valhalla/valhalla
 - Geofabrik Romania extract: https://download.geofabrik.de/europe/romania.html
 - RoTransit: `frontend/assets/data/brasov_companion.manifest.json`, `backend_v2/.../FeedController.java` (`/api/feeds`, `/{id}/file`, ETag = sha256)

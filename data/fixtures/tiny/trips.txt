@@ -1,0 +1,11 @@
+route_id,service_id,trip_id,trip_headsign
+R1,WK,R1_0800,Delta
+R1,WK,R1_0830,Delta
+R1,WK,R1_0900,Delta
+R1,WE,R1_we_1000,Delta
+R2,WK,R2_0700,Bravo
+R2,WK,R2_0730,Bravo
+R2,WK,R2_night,Bravo
+R3,WK,R3_slow,Echo
+R3,WK,R3_express,Echo
+R3,WE,R3_noon,Echo

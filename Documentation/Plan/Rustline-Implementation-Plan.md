@@ -189,7 +189,7 @@ Push the branch, open a PR, see CI green.
 
 ## M1 — GTFS ingest
 
-**Goal:** `rustline inspect brasov.zip` prints counts and a validation report that match the companion manifest (811 stops, 84 routes, 8 075 trips, 157 698 stop times, 5 services, 110 exceptions).
+**Goal:** `rustline inspect brasov.zip` prints counts and a validation report that match the companion manifest (811 stops, 84 routes, 8 075 trips, 118 534 stop_times (manifest `departure_rows` = 157 698 counts per day-kind), 5 services, 110 exceptions).
 **Prerequisites:** M0. The Brașov GTFS zip (download from your backend: `curl -o data/raw/brasov.zip https://api.horiasavin.me/api/feeds/<id>/file`).
 **Spec:** [§7.1–7.2](Rustline-Spec.md#7-data-pipeline), [§10](Rustline-Spec.md#10-time-calendars-timezone-dst-after-midnight).
 
@@ -250,7 +250,7 @@ Compare with `RoTransit/frontend/assets/data/brasov_companion.manifest.json`.
 - [ ] Time parser handles `>24:00` with tests
 - [ ] `Timetable` built from Brașov; patterns built and sorted
 - [ ] Overtaking trips split, count shown in report
-- [ ] `inspect` counts equal the manifest (811 / 84 / 8 075 / 157 698 / 5 / 110)
+- [ ] `inspect` counts equal the manifest (811 / 84 / 8 075 / 118 534 / 5 / 110; manifest `departure_rows` = 157 698 counts per day-kind)
 - [ ] Fixture feed committed with tests that load it
 
 ### Common pitfalls

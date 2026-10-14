@@ -1,2 +1,2 @@
-# Workspace clippy settings; CI runs clippy with -D warnings.
-msrv = "1.85"
+# Clippy settings. CI runs clippy with -D warnings.
+# The MSRV comes from `rust-version` in Cargo.toml.

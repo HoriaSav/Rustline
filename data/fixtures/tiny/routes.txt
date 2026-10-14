@@ -1,0 +1,4 @@
+route_id,agency_id,route_short_name,route_long_name,route_type
+R1,FX,1,Alpha - Delta,3
+R2,FX,2,Echo - Bravo,3
+R3,FX,3,Alpha - Echo,0

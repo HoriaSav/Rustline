@@ -1,23 +1,12 @@
-//! Shared data types for Rustline.
+//! Shared vocabulary of Rustline: index types, GTFS times and coordinates.
+//!
+//! Every other crate depends on this one, so it stays small and has no
+//! knowledge of file formats or parsers.
 
-/// A WGS84 coordinate in degrees.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LatLon {
-    pub lat: f64,
-    pub lon: f64,
-}
+pub mod geo;
+pub mod ids;
+pub mod time;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn latlon_holds_values() {
-        let p = LatLon {
-            lat: 45.6427,
-            lon: 25.5887,
-        };
-        assert_eq!(p.lat, 45.6427);
-        assert_eq!(p.lon, 25.5887);
-    }
-}
+pub use geo::LatLon;
+pub use ids::{PatternIdx, RouteIdx, ServiceIdx, StopIdx, TripIdx};
+pub use time::{parse_gtfs_time, Seconds, TimeError};

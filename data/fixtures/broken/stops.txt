@@ -1,0 +1,4 @@
+stop_id,stop_name,stop_lat,stop_lon
+X,Xray,-5.0,30.0
+Y,Yankee,-5.01,30.01
+Z,Zulu,,

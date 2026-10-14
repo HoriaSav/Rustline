@@ -2,3 +2,17 @@
 *.rlp
 *.osm.pbf
 data/raw/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.iml
+
+# Build outputs
+*.so
+*.apk
+
+# Secrets and signing keys
+.env*
+*.jks
+*.keystore

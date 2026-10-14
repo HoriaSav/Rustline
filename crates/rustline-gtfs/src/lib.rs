@@ -1,14 +1,26 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! GTFS ingest: read a feed, normalise it into Rustline's own [`Timetable`],
+//! build stop patterns and report data problems.
+//!
+//! Typical use:
+//! ```no_run
+//! let feed = rustline_gtfs::load(std::path::Path::new("feed.zip"))?;
+//! let counts = feed.counts();
+//! let (timetable, report) = rustline_gtfs::build_timetable(&feed)?;
+//! println!("{} stops, {} patterns, {} errors", counts.stops, timetable.patterns.len(), report.errors.len());
+//! # Ok::<(), rustline_gtfs::GtfsError>(())
+//! ```
+//!
+//! Nothing here is specific to one city: the timezone comes from
+//! `agency.txt`, the validity window from `calendar.txt`/`calendar_dates.txt`.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod build;
+mod error;
+mod load;
+mod report;
+mod timetable;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use build::build_timetable;
+pub use error::GtfsError;
+pub use load::{load, FeedCounts, RawFeed};
+pub use report::{Issue, IssueKind, Severity, ValidationReport};
+pub use timetable::{Pattern, Route, Service, Stop, StopKind, StopTime, Timetable, Trip};
