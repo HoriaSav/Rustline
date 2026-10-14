@@ -20,10 +20,20 @@ pub struct RawFeed {
 pub fn load(path: &Path) -> Result<RawFeed, GtfsError> {
     // gtfs-structures can panic on bad values (e.g. huge hours), so turn that
     // into an error instead of crashing the caller.
-    let result =
-        std::panic::catch_unwind(|| Gtfs::from_path(path)).map_err(|_| GtfsError::ParserPanic {
+    let result = std::panic::catch_unwind(|| Gtfs::from_path(path)).map_err(|payload| {
+        // A panic payload is usually a &str or a String; keep its text.
+        let message = if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        GtfsError::ParserPanic {
             path: path.to_owned(),
-        })?;
+            message,
+        }
+    })?;
     let gtfs = result.map_err(|source| GtfsError::Read {
         path: path.to_owned(),
         source,
@@ -43,7 +53,7 @@ pub struct FeedCounts {
     pub other_locations: usize,
     /// Rows of routes.txt.
     pub routes: usize,
-    /// Rows of trips.txt.
+    /// Distinct trip_ids in trips.txt (duplicate rows collapse into one).
     pub trips: usize,
     /// Rows of stop_times.txt.
     pub stop_times: usize,

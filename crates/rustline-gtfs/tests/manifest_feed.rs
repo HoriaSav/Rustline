@@ -6,7 +6,7 @@
 //! hard-coded here (paths relative to the workspace root); see the README for the RoTransit Brașov values.
 
 #[test]
-#[ignore = "needs a real feed in data/raw (see README)"]
+#[ignore = "needs a real feed, e.g. in fixtures/feeds (see README)"]
 fn real_feed_matches_expected_counts() {
     let (Ok(path), Ok(expected)) = (
         std::env::var("RUSTLINE_MANIFEST_FEED"),

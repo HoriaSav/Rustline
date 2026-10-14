@@ -1,5 +1,7 @@
 /target
 *.rlp
+*.rlp.zst
+/out/
 *.osm.pbf
 data/raw/
 
@@ -16,3 +18,6 @@ data/raw/
 .env*
 *.jks
 *.keystore
+
+# Shared GTFS test feeds (see fixtures/manifest.tsv, scripts/fetch-fixtures.sh)
+fixtures/feeds/

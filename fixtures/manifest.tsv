@@ -1,0 +1,12 @@
+# Shared GTFS test feeds. Files live in fixtures/feeds/ (gitignored).
+# Fetch/verify with: scripts/fetch-fixtures.sh   (verify only: scripts/fetch-fixtures.sh --verify)
+# URL "-" = no public URL for this exact version; copy the file in by hand.
+# Columns are tab-separated: name, file, url, sha256, bytes, downloaded (YYYY-MM-DD), note, licence (attribution)
+name	file	url	sha256	bytes	downloaded	note	licence
+brasov-manifest	brasov-manifest.zip	-	627559bac2a369dca04819efeec00de84951d8bdb9ead1529d48bbceb4be21e6	1434738	2026-10-14	RATBV feed the plan numbers refer to (RUSTLINE_MANIFEST_FEED); copied from data/raw/brasov-1771800663.zip	unknown (RATBV; no licence published in MobilityDatabase mdb-2903)
+brasov-latest	brasov-latest.zip	https://api.horiasavin.me/api/feeds/1/file	ad0d22ca80b0c0408eb7d39a05633ba3fe77cca5f0bb4b2b483a0c673459ac84	1454422	2026-10-14	RoTransit backend feed 1 (RATBV)	unknown (RATBV; no licence published in MobilityDatabase mdb-2903)
+cluj	cluj.zip	https://api.horiasavin.me/api/feeds/4/file	a7addd5cca2937da905ad3a6660358df93407697af37f8f810d6164c8ecb37a4	1692943	2026-10-14	mdb-2121, CTP Cluj; no calendar_dates	unknown (CTP Cluj-Napoca; no licence published in MobilityDatabase mdb-2121)
+timisoara	timisoara.zip	https://api.horiasavin.me/api/feeds/13/file	d133ddd2c868557150672ad3eeaa7d130209dd759b2f3661ce8ef7498bba4fe9	1839491	2026-10-14	mdb-2868; many services/exceptions, frequencies	unknown (STPT Timișoara; no licence published in MobilityDatabase mdb-2868)
+bucuresti	bucuresti.zip	https://api.horiasavin.me/api/feeds/2/file	638006e1ea12fa92ab494f2c3a96d0d51a0119b3637d6bd0bd578172959838b0	9510090	2026-10-14	mdb-2098, STB+Metrorex; largest Romanian feed	unknown (TPBI București-Ilfov; no licence published in MobilityDatabase mdb-2098)
+mbta	mbta.zip	https://cdn.mbta.com/MBTA_GTFS.zip	0e3f94392f9611e5f0247c45b8d7db4268c4fd88ae421abedf3496b058b627cb	24596791	2026-10-14	Boston; America/New_York, 3M+ stop_times	MassDOT Developers License Agreement, https://www.mass.gov/files/documents/2017/10/27/develop_license_agree_0.pdf; attribution: data provided by MassDOT/MBTA
+google-sample	google-sample.zip	https://developers.google.com/static/transit/gtfs/examples/sample-feed.zip	46404f91b8f852bf1037f7901abc215d91d1bbe2a4362c5b02a3f9ced53c8d65	3217	2026-10-14	Google sample-feed-1, minimal official feed	Apache-2.0 (google/transit repository)

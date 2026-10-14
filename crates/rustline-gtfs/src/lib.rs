@@ -16,11 +16,13 @@
 mod build;
 mod error;
 mod load;
+mod pack;
 mod report;
 mod timetable;
 
 pub use build::build_timetable;
 pub use error::GtfsError;
 pub use load::{load, FeedCounts, RawFeed};
+pub use pack::{pack_meta, try_timetable_data};
 pub use report::{Issue, IssueKind, Severity, ValidationReport};
 pub use timetable::{Pattern, Route, Service, Stop, StopKind, StopTime, Timetable, Trip};

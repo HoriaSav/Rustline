@@ -19,11 +19,16 @@ pub enum GtfsError {
         source: gtfs_structures::Error,
     },
     /// The parser panicked (e.g. an hour value so large it overflows).
-    #[error("the GTFS parser crashed while reading {path} (bad value in the feed?)")]
+    #[error("the GTFS parser crashed while reading {path} (bad value in the feed?): {message}")]
     ParserPanic {
         /// The feed path that was given.
         path: PathBuf,
+        /// The panic message.
+        message: String,
     },
+    /// The timetable does not fit the pack's `u32` offsets.
+    #[error("the timetable is too large for a pack ({0} do not fit in u32)")]
+    TooLargeForPack(String),
     /// `agency.txt` is empty, so there is no timezone.
     #[error("agency.txt has no agencies, so the feed timezone is unknown")]
     NoAgency,

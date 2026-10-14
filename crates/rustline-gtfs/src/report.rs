@@ -32,6 +32,8 @@ pub enum IssueKind {
     UnknownService,
     /// The trip's `route_id` is not in routes.txt.
     UnknownRoute,
+    /// A stop time points at a `stop_id` that is not in stops.txt.
+    UnknownStop,
     /// A frequencies.txt row with headway 0 or end ≤ start.
     InvalidFrequency,
     /// A stop/station/entrance without valid coordinates.
@@ -50,7 +52,7 @@ impl IssueKind {
         use IssueKind::*;
         match self {
             TooFewStopTimes | DecreasingTimes | MissingBoundaryTime | UnknownService
-            | UnknownRoute | InvalidFrequency => Severity::Error,
+            | UnknownRoute | UnknownStop | InvalidFrequency => Severity::Error,
             StopWithoutCoordinates
             | InterpolatedTimes
             | OvertakingSplit
@@ -67,6 +69,7 @@ impl IssueKind {
             MissingBoundaryTime => "trips without a time at the first/last stop (dropped)",
             UnknownService => "trips with an unknown service_id (dropped)",
             UnknownRoute => "trips with an unknown route_id (dropped)",
+            UnknownStop => "trips with an unknown stop_id (dropped)",
             InvalidFrequency => "invalid frequencies.txt rows (skipped)",
             StopWithoutCoordinates => "stops without valid coordinates",
             InterpolatedTimes => "stop times interpolated (no arrival/departure given)",

@@ -326,7 +326,11 @@ fn trip_times(
                 (t.max(0) as u32, t.max(0) as u32)
             }
         };
-        let stop = *stop_idx.get(st.stop.id.as_str())?; // the parser already checked references
+        // The parser normally rejects unknown stop ids; report it if one slips through.
+        let Some(&stop) = stop_idx.get(st.stop.id.as_str()) else {
+            report.add(IssueKind::UnknownStop, 1, id);
+            return None;
+        };
         times.push(StopTime {
             stop,
             arrival: Seconds(arr),
@@ -403,4 +407,39 @@ fn overtakes(tt: &Timetable, later: TripIdx, earlier: TripIdx) -> bool {
         .iter()
         .zip(tt.trip_stop_times(earlier))
         .any(|(l, e)| l.arrival < e.arrival || l.departure < e.departure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn stop_time(stop_id: &str, seq: u32, time: u32) -> gtfs_structures::StopTime {
+        let stop = gtfs_structures::Stop {
+            id: stop_id.to_string(),
+            ..Default::default()
+        };
+        gtfs_structures::StopTime {
+            stop: Arc::new(stop),
+            stop_sequence: seq,
+            arrival_time: Some(time),
+            departure_time: Some(time),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn trip_with_unknown_stop_is_reported_and_dropped() {
+        let trip = gtfs_structures::Trip {
+            id: "T1".to_string(),
+            stop_times: vec![stop_time("A", 1, 100), stop_time("NOPE", 2, 200)],
+            ..Default::default()
+        };
+        let stop_idx: HashMap<&str, StopIdx> = HashMap::from([("A", StopIdx(0))]);
+        let mut report = ReportBuilder::default();
+
+        assert!(trip_times(&trip, &stop_idx, &mut report).is_none());
+        let report = report.finish();
+        assert_eq!(report.count(IssueKind::UnknownStop), 1);
+    }
 }

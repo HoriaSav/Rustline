@@ -189,6 +189,20 @@ sequenceDiagram
 - Serialization: `rkyv` (zero-copy, mmap-able) **or** hand-written flat arrays with `bytemuck`. Decision in milestone M2 after a small benchmark. Compression: zstd for transport, decompressed once on device (like the current `.sqlite.gz`).
 - **Versioning:** pack file name `rustline-{feedId}-{feed_sha[0..12]}-v{format}.rlp`; a pack is valid only if its `feed_sha256` equals the backend's `current.sha256`. Format version bumps on any breaking layout change; the core refuses unknown versions with `PackError::UnsupportedVersion`.
 - Size for Brașov **(est.)**: timetable ~2–5 MB raw, street graph ~5–15 MB raw, ~3–8 MB zstd. To be measured in M2.
+- **M2 decision (2026-10-14): `rkyv` 0.8** (needs Rust 1.81, inside MSRV 1.85) for the body, behind a small hand-written header: `magic "RLPK" | format_version u16 | feed_sha256 [32] | osm_sha256 [32] | built_at i64 | valid_from i32 | valid_to i32 (days since 1970-01-01) | timezone (u16 len + UTF-8) | feed_id (u16 len + UTF-8) | body_len u64 | body | crc32 u32`. Format version **2** since the M2 review (v1 had no checksum). The CRC32 (crc32fast) covers every byte before it and is checked on read (`Corrupt("body checksum mismatch")`). The body may be at most 256 MiB by default (`read_pack_with_limit` / `Engine::from_bytes_with_limit` change it); a `.rlp.zst` whose frame declares a bigger size is refused before decompressing, and the stream is decompressed straight into the aligned body buffer (no extra copy), which grows 1 MiB at a time as data arrives (the header's length is never trusted for allocation). `build-pack` writes the content size into the frame. The body is one rkyv archive of `TimetableData` (flat CSR arrays of `u8`/`u16`/`u32`/`u64` + strings; coordinates as `f64::to_bits`). There is no section table yet: with one archive there is only one section; it comes with the street graph in M4. `bytemuck` flat arrays were **not** benchmarked: rkyv loads Brașov in under 1 ms (median), about 600× under the 500 ms phone budget, so hand-writing the layout would not pay off. `read_pack` copies the body into an aligned buffer, validates it (bytecheck), then checks every CSR offset and index, so a damaged file gives `PackError::Corrupt`, never a panic. Building with `--built-at` or `SOURCE_DATE_EPOCH` gives byte-identical packs.
+- **Measured (M2, PC, release, timetable only, zstd level 19):**
+  - Build/size: `target/release/rustline build-pack --gtfs fixtures/feeds/<feed>.zip --out /tmp/rl_m2/<feed> --feed-id <feed> --built-at 1700000000` (wall time and peak RSS via Python `resource.getrusage`).
+  - Load: `RUSTLINE_MANIFEST_FEED=fixtures/feeds/<feed>.zip cargo test --locked --release -p rustline-core --test engine -- --ignored --nocapture` (median of 10 `Engine::from_bytes`, uncompressed bytes in memory).
+
+  | Feed | stop_times (packed) | `.rlp` | `.rlp.zst` | build | peak RAM (build) | `Engine::from_bytes` median of 10 |
+  |---|---|---|---|---|---|---|
+  | Brașov (`fixtures/feeds/brasov-manifest.zip`) | 118 534 | 1 702 337 B (1.7 MB) | 166 858 B (167 KB) | 0.41 s | 74 MB | 0.81 ms |
+  | Cluj | 231 429 | 3 082 966 B | 317 759 B | 0.67 s | 119 MB | – |
+  | Timișoara | 206 136 | 2 723 059 B | 217 058 B | 0.66 s | 103 MB | – |
+  | București | 1 450 165 | 16 397 723 B | 1 460 342 B | 4.91 s | 412 MB | – |
+  | MBTA (Boston) | 3 133 078 (packed; 3 133 085 raw rows) | 31 806 758 B | 1 770 850 B | 7.17 s | 746 MB | 14.99 ms |
+
+  (Re-measured 2026-10-14 after adding the CRC32 trailer and the zstd frame checksum; load includes the CRC pass.)
 
 ### 7.6 Where packs are built
 Phase 1: on your PC with `rustline build-pack`. Later: backend_v2 (or a CI job) builds a pack when a new feed sha appears and serves it at e.g. `/api/feeds/{id}/routing-pack` with the same ETag logic. Bundle one pack in the app like `brasov_companion.sqlite.gz`.

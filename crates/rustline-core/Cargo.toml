@@ -9,3 +9,8 @@ repository.workspace = true
 [dependencies]
 rustline-model = { path = "../rustline-model" }
 rustline-pack = { path = "../rustline-pack" }
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Only for tests: builds a pack from a GTFS feed.
+rustline-gtfs = { path = "../rustline-gtfs" }
