@@ -1,0 +1,13 @@
+[package]
+name = "rustline-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustline-model = { path = "../rustline-model" }
+rustline-gtfs = { path = "../rustline-gtfs" }
+rustline-osm = { path = "../rustline-osm" }
+rustline-pack = { path = "../rustline-pack" }
+rustline-core = { path = "../rustline-core" }

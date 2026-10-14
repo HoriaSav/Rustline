@@ -1,0 +1,2 @@
+# Workspace clippy settings; CI runs clippy with -D warnings.
+msrv = "1.85"
