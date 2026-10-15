@@ -503,3 +503,31 @@ fn short_rows_load() {
     let feed = TempFeed::new(&[("trips.txt", &trips(&["T"])), ("stop_times.txt", st)]);
     assert!(load(&feed.0).is_ok());
 }
+
+#[test]
+fn duplicate_transfer_rows_are_counted_and_one_is_kept() {
+    // A→B three times, A→C once: 2 duplicates. The kept A→B row has the longest
+    // min_transfer_time (Leader, M4 fix round). D→E twice with the same time: the
+    // higher transfer_type (3, not possible) is kept.
+    let feed = TempFeed::new(&[
+        ("trips.txt", &trips(&["T"])),
+        (
+            "stop_times.txt",
+            &stop_times(&[
+                ("T", "08:00:00", "08:00:00", "A", 1),
+                ("T", "08:05:00", "08:05:00", "B", 2),
+            ]),
+        ),
+        (
+            "transfers.txt",
+            "from_stop_id,to_stop_id,transfer_type,min_transfer_time\n\
+             A,B,2,120\nA,B,0,\nA,B,2,60\nA,C,2,90\nD,E,0,30\nD,E,3,30\n",
+        ),
+    ]);
+    let (tt, report) = build(&feed);
+    assert_eq!(report.count(IssueKind::DuplicateTransfer), 3);
+    assert!(report.is_clean(), "a duplicate is a warning, not an error");
+    assert_eq!(tt.transfers.len(), 3);
+    let kept: Vec<(u8, u32)> = tt.transfers.iter().map(|t| (t.kind, t.min_secs)).collect();
+    assert_eq!(kept, [(2, 120), (2, 90), (3, 30)]);
+}

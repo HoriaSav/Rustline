@@ -55,7 +55,7 @@ the GTFS stop_times count is 118 534.)
 
 ## Building a pack
 
-`rustline build-pack` turns a GTFS feed into a routing pack: `rustline-{feedId}-{sha12}-v3.rlp` (format version 3)
+`rustline build-pack` turns a GTFS feed into a routing pack: `rustline-{feedId}-{sha12}-v4.rlp` (format version 4)
 and the same file compressed as `.rlp.zst` (the loader accepts both). The header carries the
 SHA-256 of the feed zip, so an app can compare it with the backend's `current.sha256`.
 `--feed-id` defaults to the feed's file name. `--built-at <unix seconds>` (or `SOURCE_DATE_EPOCH`)
@@ -63,7 +63,7 @@ fixes the build time stored in the header, so the same feed always gives a byte-
 
 ```bash
 cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-manifest.zip --out out/ --feed-id myfeed --built-at 1700000000
-cargo run --locked --release -p rustline-cli -- inspect out/rustline-myfeed-627559bac2a3-v3.rlp
+cargo run --locked --release -p rustline-cli -- inspect out/rustline-myfeed-627559bac2a3-v4.rlp
 cargo test --locked -p rustline-pack                     # round trip + bad-file tests on the fixture
 RUSTLINE_MANIFEST_FEED=fixtures/feeds/brasov-manifest.zip \
 cargo test --locked --release -p rustline-pack --test round_trip -- --ignored --nocapture   # real feed, all trips
@@ -73,11 +73,14 @@ cargo test --locked --release -p rustline-core --test engine -- --ignored --noca
 
 ## Planning a journey (M3)
 
-`rustline plan` runs RAPTOR between two GTFS stop ids of a pack (no walking yet:
-changing between platforms needs a `transfers.txt` row until M4).
+`rustline plan --from-stop/--to-stop` runs RAPTOR between two GTFS stop ids of a pack.
+Since M4 it also walks between nearby stops (the pack's footpaths, see below).
+
+A `transfers.txt` row straight from the origin stop to the destination stop gives a
+0-ride journey (just that walk), listed like any other journey.
 
 ```bash
-cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-myfeed-627559bac2a3-v3.rlp --from-stop node/3652436629 --to-stop node/3708889570 --at 2026-10-15T08:00
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-myfeed-627559bac2a3-v4.rlp --from-stop node/3652436629 --to-stop node/3708889570 --at 2026-10-15T08:00
 cargo test --locked --release -p rustline-core --test m3_raptor -- --nocapture      # fixture and edge-case tests
 ```
 
@@ -89,6 +92,65 @@ cargo test --locked --release -p rustline-core --test m3_raptor --test m3_budget
 
 ```bash
 cargo test --locked -p rustline-core --features oracle --test oracle_feature
+```
+
+## Door to door (M4)
+
+Walking uses an OpenStreetMap extract (`fixtures/feeds/romania-260101.osm.pbf`, see
+`fixtures/manifest.tsv`). The area comes from the feed, never from the code:
+
+```bash
+BBOX=$(cargo run -q --locked --release -p rustline-cli -- bbox --gtfs fixtures/feeds/brasov-latest.zip --margin-km 2)
+cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-latest.zip --osm fixtures/feeds/romania-260101.osm.pbf --bbox "$BBOX" --out out/ --feed-id brasov --built-at 1700000000
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-ad0d22ca80b0-v4.rlp --from 45.6427,25.5887 --to 45.6579,25.6012 --at 2026-10-15T08:00 --geojson /tmp/j.geojson
+```
+
+`bbox` prints `min_lon,min_lat,max_lon,max_lat` (the order `osmium extract -b` takes).
+`--geojson` writes a FeatureCollection of LineStrings (one per leg) for geojson.io.
+`build-pack --osm` prints the OSM and foot-graph counts, the stops more than 100 m from
+any street, and the footpath count. Without `--osm` (or when the extract has no streets
+in the bbox: a warning) every walk is a straight line × 1.3, and `PackInfo::street_graph`
+is false.
+
+What is walkable (`rustline-osm`, spec §7.3 list): ways with `highway` = footway, path,
+pedestrian, steps, living_street, residential, service, unclassified, tertiary,
+secondary, primary, track, crossing, platform, corridor, primary_link, secondary_link,
+tertiary_link; any other `highway` (motorway, motorway_link, trunk, trunk_link,
+cycleway, …) only with `foot` = yes/designated/permissive. `foot=no` always excludes; `access=private`
+or `access=no` excludes unless `foot` allows it. Pedestrians walk both ways; only
+`oneway:foot=yes` makes a way one-way (plain `oneway=yes` does not). `highway=steps`
+costs × 1.5; `incline`/elevation is ignored. Street islands are dropped unless a stop is
+linked to them.
+
+API (`rustline-core`, FFI-friendly: plain structs and enums, no pub fields on the graph):
+`Engine::plan(&PlanRequest) -> Result<PlanResponse, PlanError>`.
+- `PlanRequest { from, to, time: TimeSpec::DepartAt(..), walk_speed_mps, max_access_m,
+  max_transfer_m, max_transfers, max_results }`; `Default` = 1.3 m/s, 1 000 m, 500 m,
+  3 transfers, 5 results.
+- Limits (else `PlanError::InvalidRequest`): valid lat/lon; speed in (0, 3] m/s;
+  `max_access_m` ≤ 3 000; `max_transfer_m` ≤ 500 (the pack's footpaths stop there);
+  `max_results` 1–255. `max_transfers` is capped at 8.
+- A point more than 300 m from every street → `OutsideCoverage` (exactly 300 m still
+  snaps; the walk to the street counts). A date outside the feed → `DateOutsideFeed`;
+  nothing usable → `NoRoute`.
+- Walking only is offered up to 3 km and kept when it arrives at most 3 min after the
+  best ride. Street searches stop at 10 km and 500 000 settled nodes.
+- `PlanResponse { itineraries: Vec<Itinerary>, warnings: Vec<Warning> }`;
+  `Itinerary { legs, departure, arrival, transfers, walk_m }`;
+  `Leg::Walk { start, end, distance_m, from_stop, to_stop, geometry }` and
+  `Leg::Transit { trip_id, route_id, route_name, headsign, from_stop, to_stop, board,
+  alight, geometry }`; `Warning::StopNotLinkedToStreets(stop_id)`, `Warning::NoStreetGraph`.
+- `rustline_osm::build_foot_graph(path, Option<BBox>)` and
+  `build_foot_graph_with_limits(path, Option<BBox>, &OsmLimits)` (defaults: blobs ≤ 32 MiB,
+  ≤ 8 M nodes kept, ≤ 1 M walkable ways; the whole Romania file without a bbox is over
+  the node limit and fails with `OsmError::Limit`). An empty extract or a bbox with no
+  streets gives an empty graph, not an error.
+
+Slow M4 tests (need `fixtures/feeds/` with the OSM extract):
+
+```bash
+cargo test --locked --release -p rustline-cli --test m4_real --test m4_budget -- --ignored --nocapture --test-threads 1
+cargo test --locked --release -p rustline-osm --test m4_osm -- --ignored --nocapture   # whole-country extract
 ```
 
 Test fixtures live in `data/fixtures/` (`tiny`: a clean feed; `broken`: one of
@@ -129,9 +191,32 @@ to **M5**, where Rustline gets its own lenient `stop_times`/`trips` reader (spec
 (#11, "a self-transfer hides a walk", was fixed in the M3 review round by keeping ride and
 walk arrivals apart; its test `self_transfer_time_does_not_hide_a_faster_walk` now runs.)
 
-12. **max_results** – there is no `max_results` parameter yet (so no `max_results` = 0 case):
-    a query returns the whole Pareto set after the 5-minute rule, at most 9 journeys. It
-    arrives with `PlanRequest` in M4.
+(#12, "no max_results", is closed in M4: `PlanRequest::max_results`, 0 → `InvalidRequest`.
+`plan --from-stop/--to-stop` still lists the whole Pareto set.)
+
+13. **Duplicate transfers.txt rows** – for the same (from, to) only one row is kept: the
+    longest `min_transfer_time` (ties: the higher `transfer_type`, so 3 "not possible"
+    wins), so Rustline never promises a quicker change than the agency. The others are counted
+    as a `DuplicateTransfer` warning in the validation report, and `build-pack` prints
+    `warning: N duplicate transfers.txt rows …`. Test:
+    `duplicate_transfer_rows_are_counted_and_one_is_kept`.
+
+## Known gaps (M4)
+14. **Departure only** – `TimeSpec` has only `DepartAt` (no arrive-by).
+15. **Tag list** – `cycleway` (and any value not listed above) is walkable only with an
+    explicit `foot` tag, so a cycle path without one is not used even where people walk
+    on it in practice (Leader, M4 answers; spec §7.3 says the list is to be tuned).
+16. **OSM order** – nodes must come before ways (the usual PBF order); a file with nodes
+    after ways gives `OsmError::Unsupported`. Relations (multipolygon squares) are ignored.
+17. **Bbox edge** – a way leaving the bbox is cut at its last node inside; walks along
+    the edge of the bbox may be longer than in reality.
+18. **Transit geometry** – the ride line is drawn stop to stop (shapes.txt is not used).
+19. **0-ride RAPTOR results** – a pure transfers.txt/footpath result is dropped; the
+    direct street walk stands in for it.
+20. **Rounding** – footpath times are whole seconds; one-to-many walks are capped by real
+    metres while steps are costed × 1.5.
+21. **Unlinked stops** – a stop more than 100 m from any street is reached by a straight
+    line × 1.3 and gives `Warning::StopNotLinkedToStreets` (Brașov: 2 stops).
 
 ## Toolchain
 - Rust stable via rustup, pinned in `rust-toolchain.toml` (Android targets `aarch64-linux-android`, `x86_64-linux-android`).

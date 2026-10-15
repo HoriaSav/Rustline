@@ -27,7 +27,7 @@ fn info_matches_the_pack() {
     let engine = Engine::from_bytes(&pack_bytes(&workspace_path("data/fixtures/tiny"))).unwrap();
     let info = engine.info();
     assert_eq!(info.feed_sha256, "ab".repeat(32));
-    assert_eq!(info.format_version, 3);
+    assert_eq!(info.format_version, rustline_pack::FORMAT_VERSION);
     assert_eq!(info.feed_id, "tiny");
     assert_eq!(info.trips, engine.pack().timetable().trip_count());
     assert!(info.valid_from <= info.valid_to);
@@ -44,7 +44,12 @@ fn missing_file_is_an_io_error() {
 #[test]
 #[ignore = "needs a real feed, e.g. in fixtures/feeds (see README)"]
 fn from_bytes_median_of_10() {
-    let feed = std::env::var("RUSTLINE_MANIFEST_FEED").expect("set RUSTLINE_MANIFEST_FEED");
+    let Ok(feed) = std::env::var("RUSTLINE_MANIFEST_FEED") else {
+        eprintln!(
+            "skip: set RUSTLINE_MANIFEST_FEED=fixtures/feeds/brasov-manifest.zip (see README)"
+        );
+        return;
+    };
     let bytes = pack_bytes(&workspace_path(&feed));
     let mut times: Vec<Duration> = (0..10)
         .map(|_| {

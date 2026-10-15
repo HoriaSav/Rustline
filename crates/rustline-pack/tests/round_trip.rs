@@ -187,12 +187,13 @@ fn bad_magic_is_rejected() {
 #[test]
 fn old_and_unknown_versions_are_rejected() {
     // The CRC no longer matches either, but the version is checked first.
-    for v in [0u16, 1, 2, 99] {
+    for v in [0u16, 1, 2, 3, 99] {
         let mut bytes = tiny_bytes();
         bytes[4..6].copy_from_slice(&v.to_le_bytes());
         assert!(matches!(
             read_pack(&bytes),
-            Err(PackError::UnsupportedVersion { found, supported: 3 }) if found == v
+            Err(PackError::UnsupportedVersion { found, supported })
+                if found == v && supported == rustline_pack::FORMAT_VERSION
         ));
     }
 }
@@ -334,7 +335,12 @@ fn ten_thousand_random_mutations_never_panic() {
 #[test]
 #[ignore = "needs a real feed, e.g. in fixtures/feeds (see README)"]
 fn real_feed_round_trips() {
-    let feed = std::env::var("RUSTLINE_MANIFEST_FEED").expect("set RUSTLINE_MANIFEST_FEED");
+    let Ok(feed) = std::env::var("RUSTLINE_MANIFEST_FEED") else {
+        eprintln!(
+            "skip: set RUSTLINE_MANIFEST_FEED=fixtures/feeds/brasov-manifest.zip (see README)"
+        );
+        return;
+    };
     let (tt, data, meta) = build(&workspace_path(&feed));
     let bytes = to_bytes(&data, &meta);
     assert_eq!(bytes, to_bytes(&data, &meta), "two writes differ");

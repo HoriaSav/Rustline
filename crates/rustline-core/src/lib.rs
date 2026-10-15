@@ -1,21 +1,32 @@
 //! The journey planner engine. M2: opening a pack; M3: RAPTOR stop to
-//! stop. Walking follows in M4.
+//! stop; M4: door to door with walking ([`Engine::plan`]).
 
 use std::path::Path;
 
+mod build;
 #[cfg(feature = "oracle")]
 pub mod oracle;
+mod plan;
 mod raptor;
+mod street;
 
+pub use build::{add_walking, StreetInput, WalkingReport, LINK_MAX_M};
+pub use plan::{
+    Itinerary, Leg, PlanError, PlanRequest, PlanResponse, Polyline, StopRef, TimeSpec, Warning,
+    DETOUR_FACTOR, MAX_ACCESS_M, MAX_TRANSFER_M, MAX_WALK_SPEED_MPS, SNAP_MAX_M, WALK_BONUS_SECS,
+    WALK_ONLY_MAX_M,
+};
 pub use raptor::{
     raptor_pareto, raptor_stop_to_stop, QueryError, MAX_TRANSFERS, MORE_RIDES_MIN_GAIN_SECS,
 };
+pub use street::SEARCH_CAP_M;
 
 use rustline_pack::{read_pack, read_pack_with_limit, Pack, PackError};
 
 /// The entry point the app (and later the FFI layer) talks to.
 pub struct Engine {
     pack: Pack,
+    streets: Option<street::Streets>,
 }
 
 /// What a loaded pack contains.
@@ -47,6 +58,16 @@ pub struct PackInfo {
     pub patterns: usize,
     /// Number of services (calendars).
     pub services: usize,
+    /// True when the pack has a street graph; false: walks are straight
+    /// lines × 1.3 (built without OSM data, or no streets were found).
+    pub street_graph: bool,
+    /// SHA-256 of the OSM extract, 64 hex characters (zeros without one).
+    pub osm_sha256: String,
+    /// Street graph nodes and segments (0 without a street graph).
+    pub street_nodes: usize,
+    pub street_segments: usize,
+    /// Precomputed footpaths between stops.
+    pub footpaths: usize,
 }
 
 impl Engine {
@@ -58,17 +79,21 @@ impl Engine {
 
     /// Opens a pack that is already in memory.
     pub fn from_bytes(bytes: &[u8]) -> Result<Engine, PackError> {
-        Ok(Engine {
-            pack: read_pack(bytes)?,
-        })
+        Engine::new(read_pack(bytes)?)
+    }
+
+    /// Wraps a checked pack (builds the street indexes). A street graph whose
+    /// index would be too big is [`PackError::Corrupt`].
+    pub fn new(pack: Pack) -> Result<Engine, PackError> {
+        let streets =
+            street::Streets::new(pack.timetable(), LINK_MAX_M).map_err(PackError::Corrupt)?;
+        Ok(Engine { pack, streets })
     }
 
     /// Opens a pack in memory whose body may be up to `max_body_bytes`
     /// (the default limit is [`rustline_pack::DEFAULT_MAX_BODY_BYTES`]).
     pub fn from_bytes_with_limit(bytes: &[u8], max_body_bytes: u64) -> Result<Engine, PackError> {
-        Ok(Engine {
-            pack: read_pack_with_limit(bytes, max_body_bytes)?,
-        })
+        Engine::new(read_pack_with_limit(bytes, max_body_bytes)?)
     }
 
     /// The loaded pack.
@@ -86,6 +111,11 @@ impl Engine {
         max_transfers: u8,
     ) -> Result<Vec<rustline_model::Journey>, QueryError> {
         raptor_stop_to_stop(&self.pack, from, to, date, dep, max_transfers)
+    }
+
+    /// Door-to-door itineraries; see [`PlanRequest`] and the `plan` module docs.
+    pub fn plan(&self, req: &PlanRequest) -> Result<PlanResponse, PlanError> {
+        plan::plan(&self.pack, self.streets.as_ref(), req)
     }
 
     /// Counts, sha and validity of the loaded pack.
@@ -106,6 +136,11 @@ impl Engine {
             stop_times: t.stop_time_count(),
             patterns: t.pattern_count(),
             services: t.service_ids.len(),
+            street_graph: self.streets.is_some(),
+            osm_sha256: m.osm_sha256.iter().map(|b| format!("{b:02x}")).collect(),
+            street_nodes: t.street_lat.len(),
+            street_segments: t.seg_a.len(),
+            footpaths: t.footpath_to.len(),
         }
     }
 }

@@ -136,7 +136,7 @@ Rustline/
 Rule: **only `rustline-core`, `-model`, `-pack` go on the phone.** `-gtfs` and `-osm` (heavy parsers) run at build time, keeping the phone library small.
 
 ### 6.3 Modules inside `rustline-core`
-- `street/` — snapping a coordinate to the nearest walkable edge (R-tree, crate `rstar`), Dijkstra/A\* on the foot graph, one-to-many searches.
+- `street/` — snapping a coordinate to the nearest walkable edge (a uniform grid of segment pieces built at load; see §7.4), Dijkstra/A\* on the foot graph, one-to-many searches.
 - `transit/raptor.rs` — RAPTOR rounds, labels, journey reconstruction.
 - `transit/calendar.rs` — active services per date.
 - `transit/frequencies.rs` — expanded trips from frequencies.txt (done at pack build).
@@ -172,8 +172,8 @@ sequenceDiagram
 - Read `transfers.txt`: type 1/2 min times, type 3 forbidden. Treat as overrides on top of computed footpaths.
 
 ### 7.3 OSM ingest (`rustline-osm`)
-- Read with `osmpbf` crate [docs.rs](https://docs.rs/osmpbf); `osm4routing` [GitHub](https://github.com/Tristramg/osm4routing2) is an option that already splits ways into routable edges.
-- Keep ways walkable by pedestrians: `highway=footway|path|pedestrian|steps|living_street|residential|service|unclassified|tertiary|secondary|primary|track|crossing…`, exclude `motorway|trunk`, `foot=no`, `access=private` (unless `foot=yes`). Tag list to be tuned.
+- Read with a small hand-written PBF reader in `rustline-osm` (decision M4, instead of the `osmpbf` crate [docs.rs](https://docs.rs/osmpbf)): it only needs nodes, way tags and refs, checks every size against `OsmLimits` before use (blob ≤ 32 MiB, lists ≤ `max_blob_bytes / 64` items, node and way counts), never sizes an allocation from a header, and keeps the dependencies to `flate2` on MSRV 1.85. Ways longer than 10 km between two nodes are cut, nodes beyond ±85° are ignored. (`osm4routing` [GitHub](https://github.com/Tristramg/osm4routing2) was the other option considered.)
+- Keep ways walkable by pedestrians: `highway=footway|path|pedestrian|steps|living_street|residential|service|unclassified|tertiary|secondary|primary|track|crossing|platform|corridor` and `primary_link|secondary_link|tertiary_link`; exclude `motorway|motorway_link|trunk|trunk_link`, `foot=no` (always, also on the values above), `access=private|no` (unless `foot=yes|designated|permissive`). Any other `highway` (e.g. `cycleway`) only with an explicit `foot=yes|designated|permissive`. Tag list to be tuned.
 - Edge cost = length / walking speed (default 1.3 m/s **(est., configurable)**), steps penalty ×1.5 **(est.)**.
 - Keep only the largest connected component (+ components containing stops), contract degree-2 nodes to shrink the graph, keep geometry for drawing.
 - **Link stops**: snap each stop to the nearest edge (≤ 100 m **(est.)**); report stops that fail.
@@ -181,11 +181,12 @@ sequenceDiagram
 ### 7.4 Precomputation
 - **Footpaths between stops**: Dijkstra from each stop up to `max_transfer_walk` (default 500 m / ~6–7 min **(est.)**). For 811 stops this is cheap at build time. Make them transitively closed or let RAPTOR chain them (vulture notes both choices, [docs](https://docs.rs/vulture)).
 - Fallback if OSM missing: straight-line distance × 1.3 detour factor **(est.)**.
+- **Snapping index (decision M4, instead of an `rstar` R-tree stored in the pack):** a uniform grid of 200 m cells built when the engine loads; each segment piece is listed in every cell its straight line crosses. Why: no extra dependency or pack section to validate, and the work is easy to bound: at most 1 M cells (cells grow on a large extent) and on average at most 32 entries per piece (real streets: ≈ 1.2), else the pack is `Corrupt`. Cost: Brașov loads in ~25–35 ms instead of ~2 ms on desktop; a stored index stays an option if phones need it.
 
 ### 7.5 Pack format (`.rlp` = Rustline pack)
 - One file, little-endian, versioned header:
   `magic "RLPK" | format_version u16 | feed_sha256 [32] | osm_sha256 [32] | built_at | valid_from/to | timezone | section table`.
-- Sections: stops, patterns, pattern_stops, trips (times as flat `u32` arrays), services (bitset per date over validity window), footpaths (CSR arrays), street graph (CSR nodes/edges + geometry), R-tree, string table (names, route short names, colours).
+- Sections: stops, patterns, pattern_stops, trips (times as flat `u32` arrays), services (bitset per date over validity window), footpaths (CSR arrays), street graph (CSR nodes/edges + geometry; no stored spatial index: decision M4, the snapping grid is rebuilt at load and capped), string table (names, route short names, colours).
 - Serialization: `rkyv` (zero-copy, mmap-able) **or** hand-written flat arrays with `bytemuck`. Decision in milestone M2 after a small benchmark. Compression: zstd for transport, decompressed once on device (like the current `.sqlite.gz`).
 - **Versioning:** pack file name `rustline-{feedId}-{feed_sha[0..12]}-v{format}.rlp`; a pack is valid only if its `feed_sha256` equals the backend's `current.sha256`. Format version bumps on any breaking layout change; the core refuses unknown versions with `PackError::UnsupportedVersion`.
 - Size for Brașov **(est.)**: timetable ~2–5 MB raw, street graph ~5–15 MB raw, ~3–8 MB zstd. To be measured in M2.
@@ -221,7 +222,7 @@ Phase 1: on your PC with `rustline build-pack`. Later: backend_v2 (or a CI job) 
 Existing engines studied (for ideas, not as dependencies): **OpenTripPlanner** (Java, uses RAPTOR since v2 — [docs](https://docs.opentripplanner.org/)), **R5** (Java, Conveyal, RAPTOR-based — [GitHub](https://github.com/conveyal/r5)), **MOTIS / nigiri** (C++, powers Transitous — [GitHub](https://github.com/motis-project/motis), [transitous.org](https://transitous.org/); Rust bindings `motis-nigiri` exist), **Valhalla** (C++, street + multimodal — [GitHub](https://github.com/valhalla/valhalla)). Why not just use one: OTP/R5 are JVM servers (not on-device); MOTIS/Valhalla are large C++ codebases, hard to cross-compile to phones and less valuable as *your* thesis work.
 
 ### 8.1 Query algorithm in detail
-1. Snap A and B to the street graph (nearest edge via R-tree; if > 300 m **(est.)** from any edge → `Error::OutsideCoverage`).
+1. Snap A and B to the street graph (nearest edge via the snapping grid, decision M4: 200 m cells, each segment piece listed in the cells it crosses, ≤ 1 M cells and ≤ 32 entries per piece; `check()` refuses pieces > 10 km, lengths that do not match the geometry and latitudes beyond ±85°; if > 300 m **(est.)** from any edge → `Error::OutsideCoverage`).
 2. Forward Dijkstra from A until `max_access_walk` (default 1 000 m **(est.)**) → list of (stop, walk_seconds). Backward Dijkstra from B → egress list.
 3. Direct walk A→B with A\* (stop if longer than `max_walk_only`, default 3 km **(est.)**).
 4. RAPTOR: initialise round 0 with `t_dep + access_time` at each access stop; per round: scan marked patterns (earliest catchable trip, boarding with `min_board_slack` default 0 s, honour pickup/drop_off_type), then relax footpaths and transfers.txt; stop after `max_transfers+1` rounds or no improvement. Targets: for each egress stop, candidate arrival = stop arrival + egress walk; keep best per round (per number of rides).

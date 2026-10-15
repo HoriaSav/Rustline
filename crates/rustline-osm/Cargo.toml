@@ -8,3 +8,7 @@ repository.workspace = true
 
 [dependencies]
 rustline-model = { path = "../rustline-model" }
+# zlib blobs of .osm.pbf files. Already in the tree (via zip) with the same
+# pure-Rust zlib-rs backend; 1.1 builds with Rust 1.67+.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+thiserror = "2.0.21"

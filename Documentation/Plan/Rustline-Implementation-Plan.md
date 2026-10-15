@@ -135,6 +135,7 @@ Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-
 - **Every persisted artefact has an integrity checksum** (pack CRC trailer + zstd frame checksum, and the same for any new section or file). The format version is checked first and gives a clear `UnsupportedVersion`, not a checksum error.
 - **No panics on any input:** no `unwrap`/`expect`/`[i]` indexing/`as` casts on data-derived values. Use `get()`, `checked_*`/`saturating_*`, `try_from`. Public APIs return `Result`. Fuzz/mutation tests (bit flips, truncation, random bytes, huge lengths) run in **both debug and release**.
 - **Bound time as well as memory.** No loop, search or recursion whose length comes from crafted input without a cap (rounds, Dijkstra settled nodes, label bags, reconstruction length, retries). Each milestone states its time and memory budget and tests a hostile input against it.
+- **Validation must bound derived work, not just ranges:** any structure built from pack data (grids, indexes) must have a cap and a tamper test. *(Added after M4 review R28 MF1: in-range street coordinates spread over the globe made the snapping grid need 3.5 GB at load.)*
 - **Measure peak RSS** (`/usr/bin/time -v`) on the largest feed (MBTA) *and* on the hostile inputs; record both in the report.
 - **Docs commands run verbatim** from `fixtures/feeds/`, with explicit output paths (no `out/*.rlp` globs that can match two files).
 - **Licence/attribution** recorded in `fixtures/manifest.tsv` for every feed and OSM extract; anything shown to users carries the attribution.
@@ -551,7 +552,7 @@ cargo test --locked -p rustline-core --features oracle     # the oracle feature'
 cargo test --locked --release -p rustline-core --test m3_raptor --test m3_budget -- --ignored --nocapture   # RAPTOR == CSA on 1 000 random queries per feed + MBTA budget (slow, ignored by default)
 cargo insta review                                # approve golden outputs once
 cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-manifest.zip --out out/ --feed-id brasov
-cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-627559bac2a3-v3.rlp --from-stop node/3652436629 --to-stop node/3708889570 --at 2026-10-15T08:00
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-627559bac2a3-v4.rlp --from-stop node/3652436629 --to-stop node/3708889570 --at 2026-10-15T08:00
 ```
 
 ### Done when
@@ -651,7 +652,8 @@ osmium extract -b 25.45,45.58,25.72,45.72 data/raw/romania.osm.pbf -o data/raw/b
 - *Why:* the whole country is ~250 MB; Brașov alone is a few MB and builds in seconds.
 
 **2. Parse walkable ways (`rustline-osm`)**
-- *How:* `osmpbf` crate, two passes: ways with a walkable `highway` tag (list in spec §7.3) and not `foot=no`/`access=private`; then the nodes they use. Output `FootGraph { node_coords: Vec<LatLon>, edges_start: Vec<u32>, edge_to: Vec<u32>, edge_len_m: Vec<f32>, edge_kind: Vec<u8> }` (CSR, both directions).
+- *Built (Leader/Builder decision, M4):* no `osmpbf`. A small hand-written reader (`rustline-osm/src/pbf.rs`, only `flate2` for zlib) reads nodes and ways in one pass (nodes must come first, as in sorted extracts). Why: every size from the file is checked against `OsmLimits` before use (blob ≤ 32 MiB, lists ≤ `max_blob_bytes / 64` items, node/way counts), no allocation is sized from a header, and it builds on MSRV 1.85 with few dependencies. Fuzzed in debug and release (Tester `m4_osm_fuzz`, Reviewer R28: 16 000 mutations, 0 panics).
+- *How (as planned):* `osmpbf` crate, two passes: ways with a walkable `highway` tag (list in spec §7.3) and not `foot=no`/`access=private`; then the nodes they use. Output `FootGraph { node_coords: Vec<LatLon>, edges_start: Vec<u32>, edge_to: Vec<u32>, edge_len_m: Vec<f32>, edge_kind: Vec<u8> }` (CSR, both directions).
 - *Why:* pedestrians walk both ways on every street, so edges are added twice. CSR again for speed and easy saving.
 
 **3. Clean the graph**
@@ -660,6 +662,7 @@ osmium extract -b 25.45,45.58,25.72,45.72 data/raw/romania.osm.pbf -o data/raw/b
 
 **4. Snapping with an R-tree (`street/snap.rs`)**
 - *How:* crate `rstar`; index edge segments; `fn snap(&self, p: LatLon) -> Option<Snap { edge, offset_m, dist_m }>`; > 300 m → `PlanError::OutsideCoverage`.
+- *Built (Leader/Builder decision, M4):* no `rstar`. A uniform grid of 200 m cells (`rustline-core/src/street.rs`) is rebuilt from the pack's street arrays when the engine loads; each segment piece is listed in the cells its line crosses. Why: no dependency, simple to cap (≤ 1 M cells, ≤ 32 entries per piece on average, error beyond; real data ≈ 1.2), and nothing extra in the pack to validate. Cost: ~10–30 ms more load time on desktop (Brașov, București); storing the index in the pack is an M5 option if phones need it.
 - *Why:* the user's position is rarely exactly on a node.
 
 **5. Link stops**
@@ -669,8 +672,8 @@ osmium extract -b 25.45,45.58,25.72,45.72 data/raw/romania.osm.pbf -o data/raw/b
 - *How:* `BinaryHeap<Reverse<(u32 secs, u32 node)>>`; one-to-many with a max cost (access/egress), A\* with straight-line heuristic for direct A→B. Cost = length / 1.3 m/s, steps ×1.5.
 - *Why:* classic, correct, and fast enough at city size; no contraction hierarchies needed (spec §8).
 
-**7. Precompute footpaths (pack v2)**
-- *How:* at build time Dijkstra from each stop up to 500 m → `footpaths` CSR section. Add the street graph + R-tree + footpaths to the pack, bump `format_version` to 2, fill `osm_sha256`. Fallback without OSM: straight line × 1.3.
+**7. Precompute footpaths (pack v4)**
+- *How:* at build time Dijkstra from each stop up to 500 m → `footpaths` CSR section. Add the street graph + footpaths to the pack (the snapping grid is rebuilt at load, step 4), bump `format_version` to 4 (v3 was M3's pack), fill `osm_sha256`. Fallback without OSM: straight line × 1.3.
 - *Why:* transfers on foot are the same every query, so compute them once.
 
 **8. Wire into RAPTOR**
@@ -685,17 +688,19 @@ osmium extract -b 25.45,45.58,25.72,45.72 data/raw/romania.osm.pbf -o data/raw/b
 
 ### How to check it works
 ```bash
-cargo run --locked --release -p rustline-cli -- build-pack --gtfs data/raw/brasov.zip --osm data/raw/brasov.osm.pbf --out out/
-cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-627559bac2a3-v3.rlp --from 45.6427,25.5887 --to 45.6579,25.6012 --at 2026-10-15T08:00 --geojson /tmp/j.geojson
+BBOX=$(cargo run -q --locked --release -p rustline-cli -- bbox --gtfs fixtures/feeds/brasov-latest.zip --margin-km 2)
+cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-latest.zip --osm fixtures/feeds/romania-260101.osm.pbf --bbox "$BBOX" --out out/ --feed-id brasov --built-at 1700000000
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-ad0d22ca80b0-v4.rlp --from 45.6427,25.5887 --to 45.6579,25.6012 --at 2026-10-15T08:00 --geojson /tmp/j.geojson
 cargo test --locked --workspace
 ```
+(The same commands as the README; the feeds and the OSM extract come from `scripts/fetch-fixtures.sh`, no osmium needed: `--bbox` crops while reading.)
 Open the GeoJSON in geojson.io and check the walking lines follow real streets.
 
 ### Done when
 - [ ] Brașov foot graph built; stats (nodes, edges, size) printed
 - [ ] All stops linked or listed in the report
 - [ ] Door-to-door golden tests pass, including "walk is better" (UC3) and "point outside the city" (`OutsideCoverage`)
-- [ ] Pack v2 loads; old v1 packs rejected with `UnsupportedVersion`
+- [ ] Pack v4 loads; older (v3) packs rejected with `UnsupportedVersion`
 
 ### Definition of done (strict)
 
@@ -718,9 +723,9 @@ pub enum PlanError { InvalidRequest(String), OutsideCoverage, NoRoute, DateOutsi
 - [ ] Door-to-door golden tests (≥ 8): normal trip, "walk is better" (UC3), origin == destination, point > 300 m from any street → `OutsideCoverage`, both points near the same stop.
 - [ ] Never worse than walking: for 1 000 random coordinate pairs inside the coverage, best result arrival ≤ walk-only arrival (property test, fixed seed).
 - [ ] Footpaths are symmetric within 1 s on an undirected graph (test).
-- [ ] Pack v2 loads; v1 packs return `UnsupportedVersion`; pack without OSM uses the straight-line fallback and says so in `PackInfo`.
+- [ ] Pack v4 loads; v3 packs return `UnsupportedVersion`; pack without OSM uses the straight-line fallback and says so in `PackInfo`.
 - [ ] Release timing for 1 000 door-to-door queries on Brașov noted in the report.
-- [ ] Safety (§11): OSM reading capped (blob size, node/way counts vs a configurable limit); no allocation sized from PBF headers; new pack sections covered by the CRC; fuzzed `.osm.pbf` and v2 packs → no panic in debug and release.
+- [ ] Safety (§11): OSM reading capped (blob size, node/way counts vs a configurable limit); no allocation sized from PBF headers; new pack sections covered by the CRC; fuzzed `.osm.pbf` and v4 packs → no panic in debug and release.
 - [ ] Bounded work: one-to-many Dijkstra stops at `max_access_m`/`max_transfer_m` and at a hard settled-node cap; A\* direct walk capped (e.g. 10 km); budgets recorded: Brașov query p95, `build-pack --osm` peak RSS for Brașov and a large extract (București).
 - [ ] OSM licence (ODbL) and extract date recorded in `fixtures/manifest.tsv`; bbox comes from `rustline bbox`, never hard-coded.
 - [ ] All items in **Edge cases (must be tested)** below have a test or a Known gap.
@@ -760,7 +765,7 @@ pub enum PlanError { InvalidRequest(String), OutsideCoverage, NoRoute, DateOutsi
 ### Common pitfalls
 - Using degrees as metres. Use haversine (or an equirectangular approximation) for distances.
 - Forgetting reverse edges → one-way walking.
-- Snapping to a motorway or a private road → filter tags *before* building the R-tree.
+- Snapping to a motorway or a private road → filter tags *before* building the snapping index.
 - Pack size jumps → measure, drop geometry if needed (spec §18).
 
 **Time (est.):** 10–14 evenings.
@@ -1096,7 +1101,7 @@ Not planned in detail; write a new spec when you get here ([spec §14](Rustline-
 | `clap` | M1 | CLI |
 | `rkyv` or `bytemuck`, `zstd`, `sha2` | M2 | pack format |
 | `fixedbitset`, `insta`, `rand` | M3 | RAPTOR, golden tests, random queries |
-| `osmpbf`, `rstar` | M4 | OSM, snapping |
+| `flate2` (zlib-rs) — *not* `osmpbf`/`rstar`, see M4 steps 2 and 4 | M4 | OSM blobs; snapping uses an own grid |
 | `chrono-tz`, `proptest`, `criterion` | M5 | timezone, property tests, benches |
 | `flutter_rust_bridge` | M6 | FFI |
 | `axum`, `tokio`, `schemars`, `tower-http` | M7 | server |

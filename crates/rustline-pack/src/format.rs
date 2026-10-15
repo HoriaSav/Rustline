@@ -13,7 +13,8 @@ pub const MAGIC: [u8; 4] = *b"RLPK";
 /// The layout version this build writes and reads.
 /// v2 (M2 review): CRC32 trailer added.
 /// v3 (M3): pickup/drop-off types, transfers.txt and block ids.
-pub const FORMAT_VERSION: u16 = 3;
+/// v4 (M4): footpaths, the street graph and the OSM extract's SHA-256.
+pub const FORMAT_VERSION: u16 = 4;
 /// First four bytes of a zstd frame.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 /// Default limit for the pack body (256 MiB). A tiny `.rlp.zst` can claim to
@@ -29,7 +30,8 @@ pub struct PackMeta {
     /// SHA-256 of the GTFS zip the pack was built from. The app compares it
     /// with the backend's `current.sha256` to know if the pack is current.
     pub feed_sha256: [u8; 32],
-    /// SHA-256 of the OSM extract (all zeros until M4).
+    /// SHA-256 of the OSM extract the street graph came from (all zeros
+    /// for a pack built without one).
     pub osm_sha256: [u8; 32],
     /// Build time, unix seconds. Pass a fixed value for reproducible packs.
     pub built_at_unix: i64,

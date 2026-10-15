@@ -1,4 +1,4 @@
-# Shared GTFS test feeds. Files live in fixtures/feeds/ (gitignored).
+# Shared GTFS test feeds and OSM extracts. Files live in fixtures/feeds/ (gitignored).
 # Fetch/verify with: scripts/fetch-fixtures.sh   (verify only: scripts/fetch-fixtures.sh --verify)
 # URL "-" = no public URL for this exact version; copy the file in by hand.
 # Columns are tab-separated: name, file, url, sha256, bytes, downloaded (YYYY-MM-DD), note, licence (attribution)
@@ -10,3 +10,4 @@ timisoara	timisoara.zip	https://api.horiasavin.me/api/feeds/13/file	d133ddd2c868
 bucuresti	bucuresti.zip	https://api.horiasavin.me/api/feeds/2/file	638006e1ea12fa92ab494f2c3a96d0d51a0119b3637d6bd0bd578172959838b0	9510090	2026-10-14	mdb-2098, STB+Metrorex; largest Romanian feed	unknown (TPBI București-Ilfov; no licence published in MobilityDatabase mdb-2098)
 mbta	mbta.zip	https://cdn.mbta.com/MBTA_GTFS.zip	0e3f94392f9611e5f0247c45b8d7db4268c4fd88ae421abedf3496b058b627cb	24596791	2026-10-14	Boston; America/New_York, 3M+ stop_times	MassDOT Developers License Agreement, https://www.mass.gov/files/documents/2017/10/27/develop_license_agree_0.pdf; attribution: data provided by MassDOT/MBTA
 google-sample	google-sample.zip	https://developers.google.com/static/transit/gtfs/examples/sample-feed.zip	46404f91b8f852bf1037f7901abc215d91d1bbe2a4362c5b02a3f9ced53c8d65	3217	2026-10-14	Google sample-feed-1, minimal official feed	Apache-2.0 (google/transit repository)
+romania-osm-260101	romania-260101.osm.pbf	https://download.geofabrik.de/europe/romania-260101.osm.pbf	36daaaf6b02f798a29cbdfbe9e2a2ae4ff90ed5315a710e2fe6ae453dc373095	309409680	2026-10-15	M4 OSM extract: Geofabrik dated (yearly, long-lived) Romania extract, data up to 2026-01-01; upstream md5 c8ebd7b2bd45ac211d05e67f7ba9e862; tests crop it with the bbox from `rustline bbox` (Brașov, Cluj, București) and use it whole for the country-size case	ODbL 1.0, https://opendatacommons.org/licenses/odbl/1-0/; attribution: © OpenStreetMap contributors (via Geofabrik GmbH)

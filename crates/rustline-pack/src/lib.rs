@@ -1,5 +1,5 @@
 //! The `.rlp` routing pack: a compact, versioned file holding the timetable
-//! (milestone M2; the street graph follows in M4).
+//! (milestone M2) and the walking network (M4).
 //!
 //! The byte layout is documented on [`write_pack`] (spec §7.5).
 //!
@@ -10,7 +10,10 @@ mod data;
 mod error;
 mod format;
 
-pub use data::{TimetableData, NO_COORD};
+pub use data::{
+    TimetableData, NO_COORD, SEG_LEN_TOLERANCE, SEG_ONEWAY, SEG_STEPS, STREET_MAX_LAT,
+    STREET_MAX_PIECE_M,
+};
 pub use error::PackError;
 pub use format::{
     read_pack, read_pack_with_limit, write_pack, Pack, PackMeta, DEFAULT_MAX_BODY_BYTES,

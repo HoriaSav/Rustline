@@ -752,7 +752,9 @@ dependencies = [
 name = "rustline-osm"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "rustline-model",
+ "thiserror",
 ]
 
 [[package]]

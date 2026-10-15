@@ -74,7 +74,7 @@ fn build_pack_is_reproducible_and_inspectable() {
         let out = rustline(&["inspect", file.to_str().unwrap(), "--json"]);
         assert!(out.status.success());
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(json["format_version"], 3);
+        assert_eq!(json["format_version"], rustline_pack::FORMAT_VERSION);
         assert_eq!(json["built_at_unix"], 1_700_000_000);
         assert_eq!(json["feed_sha256"].as_str().unwrap().len(), 64);
     }

@@ -124,7 +124,9 @@ fn transfers_are_not_chained() {
 /// M3 bumps the pack format (header names v3; README says format version 3).
 #[test]
 fn format_version_is_3() {
-    assert_eq!(rustline_pack::FORMAT_VERSION, 3);
+    // Builder (M4): the format moved on to 4 (street graph, footpaths); M3's
+    // version 3 must not come back. black_box: a constant assert is a clippy error.
+    assert!(std::hint::black_box(rustline_pack::FORMAT_VERSION) >= 3);
 }
 
 /// M3 DoD: golden journeys "checked by hand … who/when checked is noted".

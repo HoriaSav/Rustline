@@ -2,7 +2,10 @@
 //!
 //! ```text
 //! rustline inspect <feed.zip|dir|pack.rlp|pack.rlp.zst> [--json]
-//! rustline build-pack --gtfs <feed.zip|dir> --out <dir> [--feed-id <id>] [--built-at <unix>]
+//! rustline bbox --gtfs <feed.zip|dir> [--margin-km <km>]
+//! rustline build-pack --gtfs <feed.zip|dir> --out <dir> [--osm <extract.osm.pbf> [--bbox <min_lon,min_lat,max_lon,max_lat>]]
+//!                     [--feed-id <id>] [--built-at <unix>]
+//! rustline plan --pack <pack> --from <lat,lon> --to <lat,lon> --at <YYYY-MM-DDTHH:MM[:SS]> [--geojson <file>]
 //! rustline plan --pack <pack> --from-stop <stop_id> --to-stop <stop_id> --at <YYYY-MM-DDTHH:MM[:SS]>
 //! ```
 
@@ -34,11 +37,30 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print the area of a feed's stops plus a margin, as
+    /// `min_lon,min_lat,max_lon,max_lat` (the order `osmium extract -b` and
+    /// `build-pack --bbox` take).
+    Bbox {
+        /// A GTFS .zip file or an unpacked feed directory.
+        #[arg(long)]
+        gtfs: PathBuf,
+        /// Margin around the stops, in km (0 to 100).
+        #[arg(long, default_value = "2")]
+        margin_km: String,
+    },
     /// Build a routing pack (.rlp and .rlp.zst) from a GTFS feed.
     BuildPack {
         /// A GTFS .zip file or an unpacked feed directory.
         #[arg(long)]
         gtfs: PathBuf,
+        /// OpenStreetMap extract (.osm.pbf) for walking along streets.
+        /// Without it, walks are straight lines × 1.3.
+        #[arg(long)]
+        osm: Option<PathBuf>,
+        /// Only use the OSM data inside `min_lon,min_lat,max_lon,max_lat`
+        /// (see `rustline bbox`).
+        #[arg(long, requires = "osm", allow_hyphen_values = true)]
+        bbox: Option<String>,
         /// Output directory (created if missing).
         #[arg(long)]
         out: PathBuf,
@@ -50,24 +72,46 @@ enum Command {
         #[arg(long)]
         built_at: Option<i64>,
     },
-    /// Plan journeys between two stops of a pack (RAPTOR, no walking yet).
+    /// Plan door to door (`--from`/`--to`) or between two stops
+    /// (`--from-stop`/`--to-stop`).
     Plan {
         /// A .rlp or .rlp.zst pack.
         #[arg(long)]
         pack: PathBuf,
+        /// Start point `lat,lon`.
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            conflicts_with = "from_stop",
+            required_unless_present = "from_stop",
+            allow_hyphen_values = true
+        )]
+        from: Option<String>,
+        /// End point `lat,lon`.
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            conflicts_with = "to_stop",
+            required_unless_present = "to_stop",
+            allow_hyphen_values = true
+        )]
+        to: Option<String>,
         /// GTFS stop_id to leave from.
-        #[arg(long)]
-        from_stop: String,
+        #[arg(long, requires = "to_stop")]
+        from_stop: Option<String>,
         /// GTFS stop_id to go to.
+        #[arg(long, requires = "from_stop")]
+        to_stop: Option<String>,
+        /// Write the itineraries as GeoJSON (a FeatureCollection of LineStrings).
         #[arg(long)]
-        to_stop: String,
+        geojson: Option<PathBuf>,
         /// Service day and departure time, e.g. 2030-01-02T08:00 (times past
         /// midnight belong to the next service day).
         #[arg(long)]
         at: String,
-        /// Most transfers to use (capped at 8).
-        #[arg(long, default_value_t = 8)]
-        max_transfers: u8,
+        /// Most transfers to use (capped at 8; door to door defaults to 3).
+        #[arg(long)]
+        max_transfers: Option<u8>,
     },
 }
 
@@ -116,19 +160,34 @@ fn run(cli: Cli) -> Result<()> {
                 print_text(&i);
             }
         }
+        Command::Bbox { gtfs, margin_km } => bbox(&gtfs, &margin_km)?,
         Command::BuildPack {
             gtfs,
+            osm,
+            bbox,
             out,
             feed_id,
             built_at,
-        } => build_pack(&gtfs, &out, feed_id, built_at)?,
+        } => {
+            let osm = osm.map(|p| (p, bbox));
+            build_pack(&gtfs, osm, &out, feed_id, built_at)?
+        }
         Command::Plan {
             pack,
+            from,
+            to,
             from_stop,
             to_stop,
+            geojson,
             at,
             max_transfers,
-        } => plan(&pack, &from_stop, &to_stop, &at, max_transfers)?,
+        } => match (from_stop, to_stop, from, to) {
+            (Some(a), Some(b), _, _) => plan(&pack, &a, &b, &at, max_transfers.unwrap_or(8))?,
+            (_, _, Some(a), Some(b)) => {
+                door_to_door(&pack, &a, &b, &at, max_transfers, geojson.as_deref())?
+            }
+            _ => anyhow::bail!("give --from and --to, or --from-stop and --to-stop"),
+        },
     }
     Ok(())
 }
@@ -140,6 +199,7 @@ fn is_pack(path: &Path) -> bool {
 
 fn build_pack(
     gtfs: &Path,
+    osm: Option<(PathBuf, Option<String>)>,
     out: &Path,
     feed_id: Option<String>,
     built_at: Option<i64>,
@@ -154,7 +214,23 @@ fn build_pack(
             report.errors.len()
         );
     }
-    let data = rustline_gtfs::try_timetable_data(&tt)?;
+    let mut data = rustline_gtfs::try_timetable_data(&tt)?;
+    let osm_sha256 = match &osm {
+        Some((pbf, bbox)) => {
+            let sha = file_sha256(pbf)
+                .with_context(|| format!("reading OSM extract {}", pbf.display()))?;
+            add_streets(&mut data, pbf, bbox.as_deref())?;
+            sha
+        }
+        None => {
+            let r = rustline_core::add_walking(&mut data, None).map_err(anyhow::Error::msg)?;
+            println!(
+                "no OSM extract: walks are straight lines × 1.3 ({} footpaths)",
+                r.footpaths
+            );
+            [0; 32]
+        }
+    };
 
     let feed_id = feed_id.unwrap_or_else(|| feed_name(gtfs));
     let id_ok = |c: char| c.is_ascii_alphanumeric() || "-_.".contains(c);
@@ -175,7 +251,8 @@ fn build_pack(
             }
         },
     };
-    let meta = rustline_gtfs::pack_meta(&tt, feed_sha256, &feed_id, built_at);
+    let mut meta = rustline_gtfs::pack_meta(&tt, feed_sha256, &feed_id, built_at);
+    meta.osm_sha256 = osm_sha256;
 
     let mut bytes = Vec::new();
     rustline_pack::write_pack(&data, &meta, &mut bytes)?;
@@ -206,8 +283,292 @@ fn build_pack(
         data.pattern_count(),
         report.errors.len()
     );
+    let dup = report.count(rustline_gtfs::IssueKind::DuplicateTransfer);
+    if dup > 0 {
+        println!(
+            "warning: {dup} {}",
+            rustline_gtfs::IssueKind::DuplicateTransfer.describe()
+        );
+    }
     println!("build {} ms", t0.elapsed().as_millis());
     Ok(())
+}
+
+/// Reads the OSM extract, adds the street graph and footpaths to `data`
+/// and prints what it found.
+fn add_streets(
+    data: &mut rustline_pack::TimetableData,
+    pbf: &Path,
+    bbox: Option<&str>,
+) -> Result<()> {
+    let bbox = match bbox {
+        None => None,
+        Some(b) => {
+            let v: Vec<f64> = b
+                .split(',')
+                .map(|x| x.trim().parse::<f64>())
+                .collect::<Result<_, _>>()
+                .ok()
+                .filter(|v: &Vec<f64>| v.len() == 4 && v.iter().all(|x| x.is_finite()))
+                .with_context(|| {
+                    format!("--bbox {b:?}: expected min_lon,min_lat,max_lon,max_lat")
+                })?;
+            let bb = rustline_osm::BBox {
+                min_lon: v[0],
+                min_lat: v[1],
+                max_lon: v[2],
+                max_lat: v[3],
+            };
+            if !(bb.min_lat <= bb.max_lat && bb.min_lon <= bb.max_lon) {
+                anyhow::bail!("--bbox {b:?}: min is above max");
+            }
+            Some(bb)
+        }
+    };
+    let t0 = Instant::now();
+    let (g, r) = rustline_osm::build_foot_graph(pbf, bbox)
+        .with_context(|| format!("reading OSM extract {}", pbf.display()))?;
+    println!(
+        "OSM: {} nodes read ({} kept), {} ways read, {} walkable, {} skipped, {} outside the bbox, {} references to missing nodes; {} ms",
+        r.nodes_read,
+        r.nodes_kept,
+        r.ways_read,
+        r.ways_walkable,
+        r.ways_skipped,
+        r.ways_outside_bbox,
+        r.missing_node_refs,
+        t0.elapsed().as_millis()
+    );
+    if r.long_pieces > 0 {
+        println!(
+            "OSM: {} way pieces longer than {} m dropped",
+            r.long_pieces,
+            rustline_osm::MAX_PIECE_M
+        );
+    }
+    if g.seg_count() == 0 {
+        eprintln!("warning: no walkable streets in the OSM extract (or bbox): walks are straight lines × 1.3");
+        rustline_core::add_walking(data, None).map_err(anyhow::Error::msg)?;
+        return Ok(());
+    }
+    let steps: Vec<bool> = g
+        .seg_kind()
+        .iter()
+        .map(|&k| k == rustline_osm::EDGE_KIND_STEPS)
+        .collect();
+    let input = rustline_core::StreetInput {
+        nodes: g.node_coords(),
+        seg_a: g.seg_a(),
+        seg_b: g.seg_b(),
+        seg_len_m: g.seg_len_m(),
+        seg_steps: &steps,
+        seg_oneway: g.seg_oneway(),
+        shape_start: g.shape_start(),
+        shape: g.shape(),
+    };
+    let w = rustline_core::add_walking(data, Some(input)).map_err(anyhow::Error::msg)?;
+    println!(
+        "foot graph: {} nodes, {} edges ({} segments); {} components, {} kept (with stops), {} dropped",
+        w.nodes, w.edges, w.segments, w.components, w.components_kept, w.components_dropped
+    );
+    let n = w.stops_unlinked.len();
+    let shown: Vec<&str> = w
+        .stops_unlinked
+        .iter()
+        .take(20)
+        .map(String::as_str)
+        .collect();
+    println!(
+        "stops: {} linked to a street, {n} unlinked (more than 100 m away){}{}",
+        w.stops_linked,
+        if n > 0 { ": " } else { "" },
+        shown.join(", ") + if n > 20 { ", …" } else { "" }
+    );
+    if w.nodes == 0 {
+        eprintln!("warning: no street reaches a stop: walks are straight lines × 1.3");
+    }
+    println!("{} footpaths between stops", w.footpaths);
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let mut f = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut f, &mut hasher)?;
+    Ok(hasher.finalize().into())
+}
+
+/// `rustline bbox`: stop extent plus a margin.
+fn bbox(gtfs: &Path, margin_km: &str) -> Result<()> {
+    let km: f64 = margin_km
+        .trim()
+        .parse()
+        .ok()
+        .filter(|k: &f64| k.is_finite() && (0.0..=100.0).contains(k))
+        .with_context(|| format!("--margin-km {margin_km:?}: expected a number from 0 to 100"))?;
+    let feed = rustline_gtfs::load(gtfs)?;
+    let (tt, _) = rustline_gtfs::build_timetable(&feed)?;
+    let pts: Vec<_> = tt
+        .stops
+        .iter()
+        .filter_map(|s| s.pos)
+        .filter(|p| p.is_valid())
+        .collect();
+    if pts.is_empty() {
+        anyhow::bail!("{}: no stop has coordinates", gtfs.display());
+    }
+    let (mut lo, mut hi) = (pts[0], pts[0]);
+    for p in &pts {
+        lo.lat = lo.lat.min(p.lat);
+        lo.lon = lo.lon.min(p.lon);
+        hi.lat = hi.lat.max(p.lat);
+        hi.lon = hi.lon.max(p.lon);
+    }
+    let m = km * 1000.0;
+    let dlat = (m / 6_371_008.8f64).to_degrees();
+    // Degrees of longitude at the latitude farthest from the equator (widest).
+    let k = lo.lat.abs().max(hi.lat.abs()).min(89.0).to_radians().cos();
+    let dlon = dlat / k;
+    println!(
+        "{:.6},{:.6},{:.6},{:.6}",
+        (lo.lon - dlon).max(-180.0),
+        (lo.lat - dlat).max(-90.0),
+        (hi.lon + dlon).min(180.0),
+        (hi.lat + dlat).min(90.0)
+    );
+    Ok(())
+}
+
+/// `plan --from --to`: door-to-door itineraries.
+fn door_to_door(
+    path: &Path,
+    from: &str,
+    to: &str,
+    at: &str,
+    max_transfers: Option<u8>,
+    geojson: Option<&Path>,
+) -> Result<()> {
+    let point = |s: &str, what: &str| -> Result<rustline_model::LatLon> {
+        let v: Vec<f64> = s
+            .split(',')
+            .map(|x| x.trim().parse::<f64>())
+            .collect::<Result<_, _>>()
+            .ok()
+            .filter(|v: &Vec<f64>| v.len() == 2)
+            .with_context(|| format!("{what} {s:?}: expected lat,lon"))?;
+        let p = rustline_model::LatLon::new(v[0], v[1]);
+        if !p.is_valid() {
+            anyhow::bail!("{what} {s:?}: not a valid coordinate");
+        }
+        Ok(p)
+    };
+    let (a, b) = (point(from, "--from")?, point(to, "--to")?);
+    let at = parse_at(at)?;
+    let engine =
+        rustline_core::Engine::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut req = rustline_core::PlanRequest {
+        from: a,
+        to: b,
+        time: rustline_core::TimeSpec::DepartAt(at),
+        ..Default::default()
+    };
+    if let Some(m) = max_transfers {
+        req.max_transfers = m;
+    }
+    let r = engine.plan(&req)?;
+    println!("{},{} → {},{}, {}", a.lat, a.lon, b.lat, b.lon, at);
+    for w in &r.warnings {
+        println!("warning: {w:?}");
+    }
+    let hm = |t: chrono::NaiveDateTime| t.format("%H:%M:%S").to_string();
+    let stop = |s: &rustline_core::StopRef| {
+        if s.name.is_empty() || s.name == s.id {
+            s.id.clone()
+        } else {
+            format!("{} [{}]", s.name, s.id)
+        }
+    };
+    let mut features = Vec::new();
+    for (i, it) in r.itineraries.iter().enumerate() {
+        println!();
+        println!(
+            "{}. {} → {}, {} transfer(s), {} m walking",
+            i + 1,
+            hm(it.departure),
+            hm(it.arrival),
+            it.transfers,
+            it.walk_m
+        );
+        for leg in &it.legs {
+            let (kind, line, label) = match leg {
+                rustline_core::Leg::Walk {
+                    start,
+                    end,
+                    distance_m,
+                    from_stop,
+                    to_stop,
+                    geometry,
+                } => {
+                    let place = |s: &Option<rustline_core::StopRef>, end: &str| {
+                        s.as_ref().map_or(end.to_string(), stop)
+                    };
+                    let text = format!(
+                        "walk {distance_m} m, {} → {}",
+                        place(from_stop, "start"),
+                        place(to_stop, "destination")
+                    );
+                    println!("   {} → {}  {text}", hm(*start), hm(*end));
+                    ("walk", geometry, text)
+                }
+                rustline_core::Leg::Transit {
+                    trip_id,
+                    route_id,
+                    route_name,
+                    from_stop,
+                    to_stop,
+                    board,
+                    alight,
+                    geometry,
+                    ..
+                } => {
+                    let r = if route_name.is_empty() {
+                        route_id
+                    } else {
+                        route_name
+                    };
+                    let text = format!(
+                        "line {r}, {} → {} (trip {trip_id})",
+                        stop(from_stop),
+                        stop(to_stop)
+                    );
+                    println!("   {} → {}  {text}", hm(*board), hm(*alight));
+                    ("transit", geometry, text)
+                }
+            };
+            if let Some(g) = line {
+                let coords: Vec<[f64; 2]> = g.points().iter().map(|p| [p.lon, p.lat]).collect();
+                features.push(serde_json::json!({
+                    "type": "Feature",
+                    "properties": {"itinerary": i + 1, "kind": kind, "label": label},
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                }));
+            }
+        }
+    }
+    if let Some(p) = geojson {
+        let fc = serde_json::json!({"type": "FeatureCollection", "features": features});
+        fs::write(p, serde_json::to_string_pretty(&fc)?)
+            .with_context(|| format!("writing {}", p.display()))?;
+    }
+    Ok(())
+}
+
+fn parse_at(at: &str) -> Result<chrono::NaiveDateTime> {
+    ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"]
+        .iter()
+        .find_map(|f| chrono::NaiveDateTime::parse_from_str(at, f).ok())
+        .with_context(|| format!("--at {at:?}: expected YYYY-MM-DDTHH:MM[:SS]"))
 }
 
 /// File name without `.zip`, used as the default feed id.
@@ -262,6 +623,11 @@ fn inspect_pack(path: &Path, json: bool) -> Result<()> {
             "stop_times": i.stop_times,
             "patterns": i.patterns,
             "services": i.services,
+            "street_graph": i.street_graph,
+            "osm_sha256": i.osm_sha256,
+            "street_nodes": i.street_nodes,
+            "street_segments": i.street_segments,
+            "footpaths": i.footpaths,
             "load_ms": load_ms,
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -281,16 +647,21 @@ fn inspect_pack(path: &Path, json: bool) -> Result<()> {
     println!("  stop_times          {:>8}", i.stop_times);
     println!("  patterns            {:>8}", i.patterns);
     println!("  services            {:>8}", i.services);
+    println!("  street nodes        {:>8}", i.street_nodes);
+    println!("  street segments     {:>8}", i.street_segments);
+    println!("  footpaths           {:>8}", i.footpaths);
+    if i.street_graph {
+        println!("streets     OSM {}", i.osm_sha256);
+    } else {
+        println!("streets     none (walks are straight lines × 1.3)");
+    }
     println!();
     println!("load {load_ms} ms");
     Ok(())
 }
 
 fn plan(path: &Path, from: &str, to: &str, at: &str, max_transfers: u8) -> Result<()> {
-    let at = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"]
-        .iter()
-        .find_map(|f| chrono::NaiveDateTime::parse_from_str(at, f).ok())
-        .with_context(|| format!("--at {at:?}: expected YYYY-MM-DDTHH:MM[:SS]"))?;
+    let at = parse_at(at)?;
     let engine =
         rustline_core::Engine::open(path).with_context(|| format!("opening {}", path.display()))?;
     let tt = &engine.pack().timetable();

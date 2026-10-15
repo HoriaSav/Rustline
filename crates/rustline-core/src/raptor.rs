@@ -1,16 +1,16 @@
 //! RAPTOR, stop to stop (M3).
 //!
 //! Round k finds the earliest arrival at every stop with k rides. Round 0 is
-//! the origin (plus its transfers.txt links); every later round scans the
+//! the origin (plus its walking links); every later round scans the
 //! patterns of the stops that improved in the round before, then follows
-//! transfers.txt from the stops a ride just improved.
+//! the walking links from the stops a ride just improved (one hop, never two).
 //!
-//! Transfer rules (plan M3, decision 8):
+//! Transfer rules (plan M3, decision 8, and M4):
 //! - changing trips at one stop takes 0 s, or the stop's own transfers.txt
 //!   row (`X → X`) when there is one (type 3 there: no change at that stop);
-//! - changing to another stop only works through a transfers.txt row
-//!   (types 0/1/2 with `min_transfer_time`, type 3 never). Sibling platforms
-//!   of one station are not linked otherwise until M4 footpaths.
+//! - changing to another stop: a transfers.txt row (types 0/1/2 with
+//!   `min_transfer_time`, type 3 never), else the pack's precomputed
+//!   footpath (M4) when it is short enough;
 //! - `pickup_type` / `drop_off_type` 1 forbid boarding / getting off there.
 
 use chrono::NaiveDate;
@@ -71,8 +71,44 @@ struct RideLabel {
 enum WalkLabel {
     /// The query origin (round 0).
     Origin,
-    /// One transfers.txt hop from stop `from`, reached by a ride in the same round.
+    /// One hop from stop `from`, reached by a ride in the same round.
     Walk { from: u32, secs: u32 },
+}
+
+/// Which footpaths a query may use: walking time = `footpath_secs × scale`
+/// (the pack's times are at 1.3 m/s), only paths up to `max_m` metres.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Hops {
+    pub scale: f64,
+    pub max_m: u32,
+}
+
+impl Hops {
+    /// 1.3 m/s, footpaths up to 500 m (what the pack holds).
+    pub(crate) const DEFAULT: Hops = Hops {
+        scale: 1.0,
+        max_m: 500,
+    };
+
+    fn secs(&self, secs: u32) -> u32 {
+        if self.scale == 1.0 {
+            secs
+        } else {
+            (f64::from(secs) * self.scale)
+                .ceil()
+                .min(f64::from(u32::MAX / 2)) as u32
+        }
+    }
+}
+
+/// A journey found by [`raptor_multi`]: it ends at stop `target` at
+/// `journey.arr`; `arrival` adds that stop's egress time.
+#[derive(Debug, Clone)]
+pub(crate) struct Found {
+    pub journey: Journey,
+    pub origin: u32,
+    pub target: u32,
+    pub arrival: u32,
 }
 
 /// Fastest journeys from `from` to `to` leaving at `dep` or later on service
@@ -146,12 +182,34 @@ pub fn raptor_pareto(
             rides: 0,
         }]);
     }
+    let starts: Vec<(u32, u32)> = origins.iter().map(|&o| (o, dep.0)).collect();
+    let ends: Vec<(u32, u32)> = targets.iter().map(|&t| (t, 0)).collect();
+    Ok(
+        raptor_multi(pack, day, max_transfers, &starts, &ends, Hops::DEFAULT)?
+            .into_iter()
+            .map(|f| f.journey)
+            .collect(),
+    )
+}
+
+/// RAPTOR from several origin stops, each with its own earliest time, to
+/// several target stops, each with an egress time added to the arrival.
+/// One journey per number of rides that improves the best arrival.
+pub(crate) fn raptor_multi(
+    pack: &Pack,
+    day: u32,
+    max_transfers: u8,
+    origins: &[(u32, u32)],
+    targets: &[(u32, u32)],
+    hops: Hops,
+) -> Result<Vec<Found>, QueryError> {
     let rounds = usize::from(max_transfers.min(MAX_TRANSFERS)) + 1;
-    let mut search = Search::new(pack, day, rounds);
-    for &t in &targets {
-        search.is_target[t as usize] = true;
+    let mut search = Search::new(pack, day, rounds, hops);
+    for &(t, e) in targets {
+        let cell = search.egress.get_mut(t as usize).ok_or(BAD)?;
+        *cell = (*cell).min(e);
     }
-    search.run(&origins, dep.0)
+    search.run(origins)
 }
 
 /// The stop itself, or for a station (`stop_kind` 1) its child platforms.
@@ -178,10 +236,11 @@ struct Search<'a> {
     day: u32,
     rounds: usize,
     n: usize,
-    /// Destination stops (one, or a station's platforms).
-    is_target: Vec<bool>,
-    /// Earliest arrival at any destination stop so far.
+    /// Egress time of each destination stop (`NONE`: not a destination).
+    egress: Vec<u32>,
+    /// Earliest arrival at the destination (egress included) so far.
     best_target: u32,
+    hops: Hops,
     /// `ride[k * n + s]` / `walk[k * n + s]`: arrival at s in round k by a
     /// ride / a hop (only where round k improved it), with its label.
     ride: Vec<u32>,
@@ -204,7 +263,7 @@ struct Search<'a> {
 const BAD: QueryError = QueryError::BadPack("index out of range");
 
 impl<'a> Search<'a> {
-    fn new(pack: &'a Pack, day: u32, rounds: usize) -> Self {
+    fn new(pack: &'a Pack, day: u32, rounds: usize, hops: Hops) -> Self {
         let tt = pack.timetable();
         let n = tt.stop_count();
         let cells = (rounds + 1) * n;
@@ -213,8 +272,9 @@ impl<'a> Search<'a> {
             day,
             rounds,
             n,
-            is_target: vec![false; n],
+            egress: vec![NONE; n],
             best_target: NONE,
+            hops,
             ride: vec![NONE; cells],
             ride_label: vec![None; cells],
             walk: vec![NONE; cells],
@@ -229,34 +289,42 @@ impl<'a> Search<'a> {
         }
     }
 
-    fn run(mut self, origins: &[u32], dep: u32) -> Result<Vec<Journey>, QueryError> {
-        for &o in origins {
+    fn run(mut self, origins: &[(u32, u32)]) -> Result<Vec<Found>, QueryError> {
+        let mut first: Vec<(u32, u32)> = origins.to_vec();
+        first.sort_unstable();
+        for &(o, t) in &first {
             let o = o as usize;
-            *self.walk.get_mut(o).ok_or(BAD)? = dep;
-            self.walk_label[o] = Some(WalkLabel::Origin);
-            self.best_walk[o] = dep;
+            let cell = self.walk.get_mut(o).ok_or(BAD)?;
+            if t < *cell {
+                *cell = t;
+                self.walk_label[o] = Some(WalkLabel::Origin);
+                self.best_walk[o] = t;
+            }
         }
         // Hops from the origin, as if it had been reached by a ride.
-        let mut start = Vec::new();
-        for &o in origins {
-            self.hop_from(0, o as usize, dep, &mut start)?;
+        let mut start: Vec<u32> = Vec::new();
+        for &(o, _) in &first {
+            let at = self.walk[o as usize];
+            self.hop_from(0, o as usize, at, &mut start)?;
         }
-        start.extend_from_slice(origins);
+        start.extend(first.iter().map(|o| o.0));
+        start.sort_unstable();
+        start.dedup();
         self.update_ready(0, &start)?;
 
         let mut journeys = Vec::new();
-        // A transfers.txt hop straight from the origin to the destination.
+        // The origin itself, or a hop straight from it, is a destination.
         let mut best: Option<(u32, usize)> = None;
         for &s in &start {
             let s = s as usize;
-            let w = self.walk[s];
-            if self.is_target[s] && w != NONE && best.is_none_or(|b| (w, s) < b) {
-                best = Some((w, s));
+            let (w, e) = (self.walk[s], self.egress[s]);
+            if e != NONE && w != NONE && best.is_none_or(|b| (w.saturating_add(e), s) < b) {
+                best = Some((w.saturating_add(e), s));
             }
         }
         if let Some((t, s)) = best {
             self.best_target = t;
-            journeys.push(self.journey(0, s, true, dep)?);
+            journeys.push(self.found(0, s, true, t)?);
         }
         for k in 1..=self.rounds {
             if self.marked.is_empty() {
@@ -274,11 +342,13 @@ impl<'a> Search<'a> {
             let mut best: Option<(u32, usize, bool)> = None;
             for &s in &improved {
                 let s = s as usize;
-                if !self.is_target[s] {
+                let e = self.egress[s];
+                if e == NONE {
                     continue;
                 }
                 let (r, w) = (self.ride[k * self.n + s], self.walk[k * self.n + s]);
                 for (t, by_walk) in [(r, false), (w, true)] {
+                    let t = if t == NONE { NONE } else { t.saturating_add(e) };
                     if t < self.best_target && best.is_none_or(|b| (t, s) < (b.0, b.1)) {
                         best = Some((t, s, by_walk));
                     }
@@ -286,7 +356,7 @@ impl<'a> Search<'a> {
             }
             if let Some((t, s, by_walk)) = best {
                 self.best_target = t;
-                journeys.push(self.journey(k, s, by_walk, dep)?);
+                journeys.push(self.found(k, s, by_walk, t)?);
             }
         }
         Ok(journeys)
@@ -375,8 +445,9 @@ impl<'a> Search<'a> {
         })
     }
 
-    /// One transfers.txt hop from stop `x`, which round k reached at `at` by
-    /// a ride (or is the origin in round 0). Walk arrivals never hop again.
+    /// One hop (transfers.txt row, else footpath) from stop `x`, which round
+    /// k reached at `at` by a ride (or is an origin in round 0). Walk
+    /// arrivals never hop again.
     fn hop_from(
         &mut self,
         k: usize,
@@ -401,20 +472,52 @@ impl<'a> Search<'a> {
             if y >= self.n {
                 return Err(BAD);
             }
-            let t = at.saturating_add(secs);
-            if t < self.best_walk[y] && t < self.best_target {
-                if self.walk[row + y] == NONE && self.ride[row + y] == NONE {
-                    improved.push(y as u32);
-                }
-                self.walk[row + y] = t;
-                self.best_walk[y] = t;
-                self.walk_label[row + y] = Some(WalkLabel::Walk {
-                    from: x as u32,
-                    secs,
-                });
+            self.walk_to(row, x, y, at, secs, improved);
+        }
+        let rows = tt.transfers(x);
+        let listed = tt.transfer_to.get(rows).unwrap_or(&[]);
+        for f in tt.footpaths(x) {
+            let (Some(&y), Some(&secs), Some(&m)) = (
+                tt.footpath_to.get(f),
+                tt.footpath_secs.get(f),
+                tt.footpath_m.get(f),
+            ) else {
+                return Err(BAD);
+            };
+            // A transfers.txt row for the pair wins over the footpath.
+            if m > self.hops.max_m || y as usize == x || listed.binary_search(&y).is_ok() {
+                continue;
             }
+            if y as usize >= self.n {
+                return Err(BAD);
+            }
+            let secs = self.hops.secs(secs);
+            self.walk_to(row, x, y as usize, at, secs, improved);
         }
         Ok(())
+    }
+
+    fn walk_to(
+        &mut self,
+        row: usize,
+        x: usize,
+        y: usize,
+        at: u32,
+        secs: u32,
+        improved: &mut Vec<u32>,
+    ) {
+        let t = at.saturating_add(secs);
+        if t < self.best_walk[y] && t < self.best_target {
+            if self.walk[row + y] == NONE && self.ride[row + y] == NONE {
+                improved.push(y as u32);
+            }
+            self.walk[row + y] = t;
+            self.best_walk[y] = t;
+            self.walk_label[row + y] = Some(WalkLabel::Walk {
+                from: x as u32,
+                secs,
+            });
+        }
     }
 
     /// After round k: boarding times of the improved stops, and the marks
@@ -493,14 +596,30 @@ impl<'a> Search<'a> {
         self.tt.pickup_drop_off(self.time_index(trip, i)).1
     }
 
-    /// Walks the labels back from destination stop `target` in round k.
+    fn found(
+        &self,
+        k: usize,
+        target: usize,
+        by_walk: bool,
+        arrival: u32,
+    ) -> Result<Found, QueryError> {
+        let (journey, origin) = self.journey(k, target, by_walk)?;
+        Ok(Found {
+            journey,
+            origin,
+            target: target as u32,
+            arrival,
+        })
+    }
+
+    /// Walks the labels back from destination stop `target` in round k;
+    /// also gives the origin stop the journey starts at.
     fn journey(
         &self,
         k: usize,
         target: usize,
         by_walk: bool,
-        dep: u32,
-    ) -> Result<Journey, QueryError> {
+    ) -> Result<(Journey, u32), QueryError> {
         let tt = self.tt;
         let arr = if by_walk {
             self.walk[k * self.n + target]
@@ -519,14 +638,15 @@ impl<'a> Search<'a> {
                         legs.reverse();
                         let first_dep = match legs.first() {
                             Some(Leg::Transit { dep, .. }) => *dep,
-                            _ => Seconds(dep),
+                            _ => Seconds(self.walk[cell]),
                         };
-                        return Ok(Journey {
+                        let journey = Journey {
                             legs,
                             dep: first_dep,
                             arr: Seconds(arr),
                             rides,
-                        });
+                        };
+                        return Ok((journey, s as u32));
                     }
                     Some(WalkLabel::Walk { from, secs }) => {
                         legs.push(Leg::Walk {

@@ -11,7 +11,31 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// Marks a stop without coordinates in `stop_lat`/`stop_lon` (bits of `f64::NAN`).
 pub const NO_COORD: u64 = 0x7FF8_0000_0000_0000;
 
-/// Everything the router needs from the timetable.
+/// [`TimetableData::seg_flags`] bit: `highway=steps` (walking costs ×1.5).
+pub const SEG_STEPS: u8 = 1;
+/// [`TimetableData::seg_flags`] bit: walkable from a to b only (`oneway:foot=yes`).
+pub const SEG_ONEWAY: u8 = 2;
+/// Longest straight piece of a street segment (node or shape point to the
+/// next one). Real streets have pieces of a few km at most; the bound keeps
+/// what a loader derives from the geometry (the snapping grid) small.
+pub const STREET_MAX_PIECE_M: f64 = 10_000.0;
+/// Street nodes and shape points must lie within ±85° of latitude (near the
+/// poles a degree of longitude shrinks to nothing).
+pub const STREET_MAX_LAT: f64 = 85.0;
+/// `seg_len_cm` must be within this fraction (plus 1 m) of the length of the
+/// segment's geometry.
+pub const SEG_LEN_TOLERANCE: f64 = 0.01;
+
+/// Great-circle distance in metres between two points in 1e-7 degrees.
+fn haversine_e7(a: (i32, i32), b: (i32, i32)) -> f64 {
+    let d = |v: i32| f64::from(v) * 1e-7;
+    let (la1, la2) = (d(a.0).to_radians(), d(b.0).to_radians());
+    let h = ((la2 - la1) / 2.0).sin().powi(2)
+        + la1.cos() * la2.cos() * ((d(b.1) - d(a.1)).to_radians() / 2.0).sin().powi(2);
+    2.0 * 6_371_008.8 * h.sqrt().min(1.0).asin()
+}
+
+/// Everything the router needs: the timetable and (M4) the walking network.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct TimetableData {
     // ---- stops (all locations from stops.txt, sorted by GTFS id) ----
@@ -92,6 +116,39 @@ pub struct TimetableData {
     pub transfer_type: Vec<u8>,
     /// `min_transfer_time` in seconds (0 when not given).
     pub transfer_secs: Vec<u32>,
+
+    // ---- footpaths (M4; CSR by from-stop, sorted by to-stop) ----
+    /// Stop s's footpaths are `footpath_to[footpath_start[s]..[s + 1]]`:
+    /// walks to nearby stops, precomputed when the pack is built (on the
+    /// street graph, or straight lines without one). Empty array = none.
+    pub footpath_start: Vec<u32>,
+    /// Destination stop.
+    pub footpath_to: Vec<u32>,
+    /// Walking time at 1.3 m/s (steps count ×1.5), in seconds.
+    pub footpath_secs: Vec<u32>,
+    /// Walking distance in metres.
+    pub footpath_m: Vec<u32>,
+
+    // ---- street graph for walking (M4). All empty = no street graph ----
+    /// Node latitude in 1e-7 degrees (OSM's own precision).
+    pub street_lat: Vec<i32>,
+    /// Node longitude in 1e-7 degrees.
+    pub street_lon: Vec<i32>,
+    /// First node of each street segment (a one-way segment runs a → b).
+    pub seg_a: Vec<u32>,
+    /// Last node of each segment.
+    pub seg_b: Vec<u32>,
+    /// Segment length in centimetres, along its shape.
+    pub seg_len_cm: Vec<u32>,
+    /// [`SEG_STEPS`] | [`SEG_ONEWAY`].
+    pub seg_flags: Vec<u8>,
+    /// Shape points between a and b of segment s (ends not included) are
+    /// `shape_lat/lon[shape_start[s]..[s + 1]]`.
+    pub shape_start: Vec<u32>,
+    /// Shape point latitude in 1e-7 degrees.
+    pub shape_lat: Vec<i32>,
+    /// Shape point longitude in 1e-7 degrees.
+    pub shape_lon: Vec<i32>,
 
     // ---- services ----
     /// GTFS `service_id`.
@@ -187,6 +244,23 @@ impl TimetableData {
             (Some(&s), Some(&e)) if s <= e => s as usize..e as usize,
             _ => 0..0,
         }
+    }
+
+    /// Range of `stop`'s footpaths in `footpath_to`/`_secs`/`_m`
+    /// (empty if there are none or `stop` is out of range).
+    pub fn footpaths(&self, stop: usize) -> std::ops::Range<usize> {
+        match (
+            self.footpath_start.get(stop),
+            self.footpath_start.get(stop.wrapping_add(1)),
+        ) {
+            (Some(&s), Some(&e)) if s <= e => s as usize..e as usize,
+            _ => 0..0,
+        }
+    }
+
+    /// True when the pack has a street graph (built with OSM data).
+    pub fn has_streets(&self) -> bool {
+        !self.street_lat.is_empty()
     }
 
     /// True when service `service` runs on day number `day` (0 = `valid_from`).
@@ -317,6 +391,8 @@ impl TimetableData {
         if let Some(k) = self.transfer_type.iter().find(|&&k| k > 3) {
             return Err(format!("transfer_type: unknown value {k}"));
         }
+        self.check_footpaths()?;
+        self.check_streets()?;
         if let Some(k) = self.stop_kind.iter().find(|&&k| k > 2) {
             return Err(format!("stop_kind: unknown value {k}"));
         }
@@ -356,6 +432,122 @@ impl TimetableData {
         ranges.sort_unstable();
         if ranges.windows(2).any(|w| w[1].0 < w[0].1) {
             return Err("the times of two trips overlap".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl TimetableData {
+    fn check_footpaths(&self) -> Result<(), String> {
+        let stops = self.stop_ids.len();
+        if self.footpath_start.is_empty() {
+            if !self.footpath_to.is_empty() {
+                return Err("footpath_to without footpath_start".to_string());
+            }
+        } else {
+            if self.footpath_start.len() != stops + 1 {
+                return Err(format!(
+                    "footpath_start has {} entries, expected {}",
+                    self.footpath_start.len(),
+                    stops + 1
+                ));
+            }
+            check_csr(
+                "footpath_to",
+                &self.footpath_start,
+                &self.footpath_to,
+                stops,
+            )?;
+        }
+        let n = self.footpath_to.len();
+        if self.footpath_secs.len() != n || self.footpath_m.len() != n {
+            return Err("footpath_secs/footpath_m do not match footpath_to".to_string());
+        }
+        Ok(())
+    }
+
+    fn check_streets(&self) -> Result<(), String> {
+        let nodes = self.street_lat.len();
+        let segs = self.seg_a.len();
+        if self.street_lon.len() != nodes {
+            return Err("street_lon does not match street_lat".to_string());
+        }
+        if [
+            self.seg_b.len(),
+            self.seg_len_cm.len(),
+            self.seg_flags.len(),
+        ]
+        .iter()
+        .any(|&l| l != segs)
+        {
+            return Err("street segment arrays differ in length".to_string());
+        }
+        all_below("seg_a", &self.seg_a, nodes, false)?;
+        all_below("seg_b", &self.seg_b, nodes, false)?;
+        if let Some(f) = self.seg_flags.iter().find(|&&f| f > SEG_STEPS | SEG_ONEWAY) {
+            return Err(format!("seg_flags: unknown value {f}"));
+        }
+        if self.shape_lon.len() != self.shape_lat.len() {
+            return Err("shape_lon does not match shape_lat".to_string());
+        }
+        if segs == 0 && self.shape_start.is_empty() {
+            if !self.shape_lat.is_empty() {
+                return Err("shape points without segments".to_string());
+            }
+        } else {
+            if self.shape_start.len() != segs + 1 {
+                return Err(format!(
+                    "shape_start has {} entries, expected {}",
+                    self.shape_start.len(),
+                    segs + 1
+                ));
+            }
+            let ok = self.shape_start.first() == Some(&0)
+                && self.shape_start.windows(2).all(|w| w[0] <= w[1])
+                && self.shape_start.last().map(|&e| e as usize) == Some(self.shape_lat.len());
+            if !ok {
+                return Err("shape_start: bad start offsets".to_string());
+            }
+        }
+        let max_lat = (STREET_MAX_LAT * 1e7) as i32;
+        let lat_ok = |v: &[i32]| v.iter().all(|&x| (-max_lat..=max_lat).contains(&x));
+        let lon_ok = |v: &[i32]| {
+            v.iter()
+                .all(|&x| (-1_800_000_000..=1_800_000_000).contains(&x))
+        };
+        if !lat_ok(&self.street_lat)
+            || !lat_ok(&self.shape_lat)
+            || !lon_ok(&self.street_lon)
+            || !lon_ok(&self.shape_lon)
+        {
+            return Err(format!(
+                "street coordinate out of range (latitude beyond ±{STREET_MAX_LAT}° or longitude beyond ±180°)"
+            ));
+        }
+        // Bound the geometry, not just the ranges: every piece is short and
+        // the stored length matches the shape.
+        for g in 0..segs {
+            let node = |n: u32| (self.street_lat[n as usize], self.street_lon[n as usize]);
+            let r = self.shape_start[g] as usize..self.shape_start[g + 1] as usize;
+            let mid = r.map(|i| (self.shape_lat[i], self.shape_lon[i]));
+            let mut prev = node(self.seg_a[g]);
+            let mut len = 0.0;
+            for p in mid.chain(std::iter::once(node(self.seg_b[g]))) {
+                let d = haversine_e7(prev, p);
+                if d > STREET_MAX_PIECE_M {
+                    return Err(format!(
+                        "street segment {g}: a piece is longer than {STREET_MAX_PIECE_M} m ({d:.0} m)"
+                    ));
+                }
+                len += d;
+                prev = p;
+            }
+            let stored = f64::from(self.seg_len_cm[g]) / 100.0;
+            if (stored - len).abs() > SEG_LEN_TOLERANCE * len + 1.0 {
+                return Err(format!(
+                    "street segment {g}: seg_len_cm says {stored:.2} m, the geometry {len:.2} m"
+                ));
+            }
         }
         Ok(())
     }

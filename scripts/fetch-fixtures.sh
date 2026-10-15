@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Download (if missing) and verify the shared GTFS test feeds listed in fixtures/manifest.tsv.
+# Download (if missing) and verify the shared GTFS test feeds and OSM extracts listed in
+# fixtures/manifest.tsv. Every row carries a pinned sha256, e.g. the M4 OSM extract
+# romania-260101.osm.pbf (Geofabrik, ODbL) = 36daaaf6b02f798a29cbdfbe9e2a2ae4ff90ed5315a710e2fe6ae453dc373095 (309 MB).
 # Usage: scripts/fetch-fixtures.sh            fetch missing files, then verify all
 #        scripts/fetch-fixtures.sh --verify   only verify, never download
 # Upstream "latest" URLs change over time. If a download no longer matches the pinned

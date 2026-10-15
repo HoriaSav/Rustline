@@ -44,6 +44,8 @@ pub enum IssueKind {
     OvertakingSplit,
     /// Trips generated from frequencies.txt with `exact_times=0` (headway only).
     ApproximateFrequencyTrips,
+    /// A transfers.txt row for a (from, to) pair that already has one (skipped).
+    DuplicateTransfer,
 }
 
 impl IssueKind {
@@ -56,7 +58,8 @@ impl IssueKind {
             StopWithoutCoordinates
             | InterpolatedTimes
             | OvertakingSplit
-            | ApproximateFrequencyTrips => Severity::Warning,
+            | ApproximateFrequencyTrips
+            | DuplicateTransfer => Severity::Warning,
         }
     }
 
@@ -75,6 +78,9 @@ impl IssueKind {
             InterpolatedTimes => "stop times interpolated (no arrival/departure given)",
             OvertakingSplit => "extra patterns created by overtaking splits",
             ApproximateFrequencyTrips => "trips expanded from headway-only frequencies",
+            DuplicateTransfer => {
+                "duplicate transfers.txt rows (kept the longest min_transfer_time, then the higher transfer_type)"
+            }
         }
     }
 }

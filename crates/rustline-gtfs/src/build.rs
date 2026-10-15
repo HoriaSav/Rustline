@@ -108,7 +108,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
         stop_times,
         services,
         patterns: Vec::new(),
-        transfers: build_transfers(feed, &stop_idx),
+        transfers: build_transfers(feed, &stop_idx, &mut report),
         timezone,
         valid_from,
         valid_to,
@@ -130,7 +130,15 @@ fn pickup_drop_off(t: gtfs_structures::PickupDropOffType) -> u8 {
 
 /// transfers.txt rows whose both stops exist, sorted by (from, to).
 /// Types other than 0–3 (e.g. in-seat transfers) are left out for now.
-fn build_transfers(feed: &RawFeed, stop_idx: &HashMap<&str, StopIdx>) -> Vec<Transfer> {
+/// Several rows for one (from, to): the one with the longest
+/// `min_transfer_time` is kept (ties: the higher `transfer_type`, so "not
+/// possible" wins), never promising a quicker change than the agency says;
+/// the others are counted in the report.
+fn build_transfers(
+    feed: &RawFeed,
+    stop_idx: &HashMap<&str, StopIdx>,
+    report: &mut ReportBuilder,
+) -> Vec<Transfer> {
     use gtfs_structures::TransferType::*;
     let mut out = Vec::new();
     for (from_id, stop) in &feed.gtfs.stops {
@@ -148,15 +156,35 @@ fn build_transfers(feed: &RawFeed, stop_idx: &HashMap<&str, StopIdx>) -> Vec<Tra
                 Impossible => 3,
                 _ => continue,
             };
-            out.push(Transfer {
+            let row = Transfer {
                 from,
                 to,
                 kind,
                 min_secs: t.min_transfer_time.unwrap_or(0),
-            });
+            };
+            out.push((row, from_id.as_str(), t.to_stop_id.as_str()));
         }
     }
-    out.sort();
+    // Per (from, to), the row to keep first.
+    out.sort_by_key(|r| {
+        let t = r.0;
+        (
+            t.from,
+            t.to,
+            std::cmp::Reverse(t.min_secs),
+            std::cmp::Reverse(t.kind),
+        )
+    });
+    for w in out.windows(2) {
+        if (w[0].0.from, w[0].0.to) == (w[1].0.from, w[1].0.to) {
+            report.add(
+                IssueKind::DuplicateTransfer,
+                1,
+                format!("{}→{}", w[1].1, w[1].2),
+            );
+        }
+    }
+    let mut out: Vec<Transfer> = out.into_iter().map(|r| r.0).collect();
     out.dedup_by_key(|t| (t.from, t.to));
     out
 }
