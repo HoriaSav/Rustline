@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # Pinned: 0.50 pulls zip 8.6, which needs Rust 1.88 (our MSRV is 1.85).
-gtfs-structures = { version = "=0.48.0", default-features = false }
+gtfs-structures = { version = "=0.48.2", default-features = false }
 rustline-model = { path = "../rustline-model" }
 rustline-pack = { path = "../rustline-pack" }
 serde = { version = "1.0.229", features = ["derive"] }
