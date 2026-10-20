@@ -136,6 +136,7 @@ Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-
 - **No panics on any input:** no `unwrap`/`expect`/`[i]` indexing/`as` casts on data-derived values. Use `get()`, `checked_*`/`saturating_*`, `try_from`. Public APIs return `Result`. Fuzz/mutation tests (bit flips, truncation, random bytes, huge lengths) run in **both debug and release**.
 - **Bound time as well as memory.** No loop, search or recursion whose length comes from crafted input without a cap (rounds, Dijkstra settled nodes, label bags, reconstruction length, retries). Each milestone states its time and memory budget and tests a hostile input against it.
 - **Validation must bound derived work, not just ranges:** any structure built from pack data (grids, indexes) must have a cap and a tamper test. *(Added after M4 review R28 MF1: in-range street coordinates spread over the globe made the snapping grid need 3.5 GB at load.)*
+- **No `as` casts on derived values:** any value computed from input (shifted times, offsets, counts, lengths) uses `checked_*`/`try_from`, and an overflow becomes a reported error or a skipped row, never a silent wrap. Every user-visible time prints its UTC offset. *(Added after M5 review MF1/MF2: frequency expansion wrapped late times with `as u32`; CLI legs printed times without offsets, so DST-day legs were ambiguous.)*
 - **Measure peak RSS** (`/usr/bin/time -v`) on the largest feed (MBTA) *and* on the hostile inputs; record both in the report.
 - **Docs commands run verbatim** from `fixtures/feeds/`, with explicit output paths (no `out/*.rlp` globs that can match two files).
 - **Licence/attribution** recorded in `fixtures/manifest.tsv` for every feed and OSM extract; anything shown to users carries the attribution.
@@ -785,11 +786,11 @@ pub enum PlanError { InvalidRequest(String), OutsideCoverage, NoRoute, DateOutsi
 - *Why:* inside the engine everything stays simple integers; mistakes concentrate in one tested place.
 
 **2. "Noon minus 12h"**
-- *How:* service-day reference = local noon of that date minus 12 h (as an absolute instant). On 2026‑10‑25 that is 23:00 the day before in wall-clock terms. Test both DST dates: **2026‑10‑25** and **2027‑03‑28**.
+- *How:* service-day reference = local noon of that date minus 12 h (as an absolute instant). On 2027‑03‑28 (spring forward) that is 23:00 the day before in wall-clock terms; on 2026‑10‑25 (fall back) it is 01:00+03:00 the same day. Test both DST dates: **2026‑10‑25** and **2027‑03‑28**.
 - *Why:* it is the official GTFS definition and keeps 03:00 unambiguous on switch days.
 
 **3. After midnight**
-- *How:* when querying at time t on day D, RAPTOR considers trips active on D‑1 (times −86 400 s), D, and D+1 (+86 400 s) for long searches. Implement in `earliest_trip` by checking the shifted day.
+- *How:* when querying at time t on day D, RAPTOR considers trips active on D‑1, D, and D+1 for long searches. The shift between days is the real distance between their noon‑minus‑12h references (82 800 / 86 400 / 90 000 s on DST days), never a fixed 86 400 s. Implement in `earliest_trip` by checking the shifted day.
 - *Why:* UC4: a 23:50 query must find the 24:10 bus; a 00:20 query must also find it.
 
 **4. Holidays (calendar_dates)**
@@ -874,6 +875,15 @@ fn to_service_time(tz: Tz, t: DateTime<FixedOffset>) -> Vec<(NaiveDate, Seconds)
 ### Common pitfalls
 - Using `Local` time (your PC's zone) anywhere → tests break in CI (UTC). Always use the pack's timezone; tests set it explicitly (Europe/Bucharest fixture **and** a non-Romanian one, e.g. America/Toronto).
 - Treating a day as always 86 400 s in *wall-clock* terms; it isn't on DST days — that's exactly why the noon-minus-12h rule exists.
+
+### Decisions (Leader, 2026-10-18, from Tester's tests-first gaps)
+- transfers.txt: type 0 uses the footpath time (min_transfer_time ignored); type 1 = 0 min (min_transfer_time ignored); type 2 uses min_transfer_time, and when it is missing it falls back to the footpath time with a warning; type 3 forbidden. Unknown types (including values the parser rejects, e.g. 9) and trip-to-trip / route-to-route rows are skipped with a warning; the feed still loads (tolerant parse).
+- calendar_dates: type 1 and type 2 on the same day means the service does not run, with a warning. `start_date > end_date`: the service never runs, with a warning.
+- frequencies: `headway_secs = 0` drops that row with a warning, not the whole feed. Caps: per-row and total generated trips (and total stop_times); Builder picks values that keep the crafted 30-row/1 s/48 h case a clean build error under 512 MiB and let MBTA and Brașov build untouched; values written into spec §7.2.
+- Validity: `FeedExpiresSoon` is measured from the query's service date, triggered when ≤ 14 days remain. A query whose service date is outside `valid_from..=valid_to` returns `DateOutsideFeed` (no D‑1 rescue), documented.
+- Wall times (CLI `--at` without an offset only): an ambiguous time takes the earlier instant; a non-existent time moves forward past the gap. `FixedOffset` input is never ambiguous.
+- Interfaces: the plan's names win and the spec is updated to match (`FeedExpiresSoon { valid_to }`); `DateOutsideFeed` stays a unit variant; `StopNotLinkedToStreets` keeps its existing `String` payload. `chrono-tz` becomes a rustline-core dependency.
+- block_id stays Known gap #7. RAPTOR vs CSA across midnight is not checked (the oracle is one-day); recorded as a Known gap.
 
 **Time (est.):** 6–9 evenings.
 
@@ -1050,6 +1060,9 @@ curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
 **Goal:** nicer answers and thesis-ready material: walking as a 3rd criterion, arrive-by, "leave between" ranges, charts.
 **Prerequisites:** M6.
 **Spec:** [§8](Rustline-Spec.md#8-algorithms-and-why), [§9](Rustline-Spec.md#9-multi-criteria).
+
+### Moved from M1 (Savin OK, 2026-10-18)
+- Own lenient stop_times/trips reader that fixes README Known gaps #1 (time range check), #2 (huge hours, `checked_*` arithmetic), #3 (duplicate trip_id), #5 (short CSV rows / strict loading) and #6 (duplicate stop_sequence), each with its un-ignored test.
 
 ### Steps
 1. **McRAPTOR:** replace single arrival per stop with a small "bag" of labels `(arrival, walk_secs)` and keep only non-dominated ones. *Why:* lets the user see "2 min later but 600 m less walking".

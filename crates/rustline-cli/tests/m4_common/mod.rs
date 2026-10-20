@@ -68,11 +68,14 @@ pub mod api {
     }
 
     /// Spec §11.1 `PlanRequest` with the plan's field names (DoD), defaults otherwise.
+    /// M5 (Builder): `DepartAt` takes an instant; `at` is read as UTC, the line
+    /// city's zone. (For a real feed in another zone the query instant moves by
+    /// that zone's offset, which the property tests here do not depend on.)
     pub fn req(from: (f64, f64), to: (f64, f64), at: NaiveDateTime) -> PlanRequest {
         PlanRequest {
             from: LatLon::new(from.0, from.1),
             to: LatLon::new(to.0, to.1),
-            time: TimeSpec::DepartAt(at),
+            time: TimeSpec::DepartAt(at.and_utc().fixed_offset()),
             ..PlanRequest::default()
         }
     }
@@ -89,8 +92,10 @@ pub mod api {
                     geometry,
                     ..
                 } => LegV::Walk {
-                    start: *start,
-                    end: *end,
+                    // M5 (Builder): times are instants in the feed's zone; the
+                    // tests compare wall-clock times.
+                    start: start.naive_local(),
+                    end: end.naive_local(),
                     distance_m: *distance_m,
                     geometry: geometry
                         .as_ref()
@@ -107,14 +112,14 @@ pub mod api {
                     trip_id: trip_id.clone(),
                     from_stop: from_stop.id.clone(),
                     to_stop: to_stop.id.clone(),
-                    board: *board,
-                    alight: *alight,
+                    board: board.naive_local(),
+                    alight: alight.naive_local(),
                 },
             })
             .collect::<Vec<_>>();
         It {
-            dep: it.departure,
-            arr: it.arrival,
+            dep: it.departure.naive_local(),
+            arr: it.arrival.naive_local(),
             rides: legs
                 .iter()
                 .filter(|l| matches!(l, LegV::Transit { .. }))

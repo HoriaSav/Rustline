@@ -94,7 +94,10 @@ pub struct Transfer {
     pub to: StopIdx,
     /// `transfer_type`: 0 recommended, 1 timed, 2 minimum time, 3 not possible.
     pub kind: u8,
-    /// `min_transfer_time` in seconds (0 when empty).
+    /// Seconds the change takes (M5 decisions): type 2 its `min_transfer_time`;
+    /// type 1 0 s; type 0 (and type 2 without a time) the straight-line walk
+    /// at 1.3 m/s × 1.3 (the engine uses the pack footpath when it has one);
+    /// type 3 the given time, only used to pick among duplicates.
     pub min_secs: u32,
 }
 

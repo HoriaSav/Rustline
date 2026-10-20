@@ -20,6 +20,14 @@ use crate::timetable::{
 };
 use crate::{GtfsError, IssueKind, RawFeed, ValidationReport};
 
+/// Most trips one frequencies.txt row may generate (spec §7.2). A 1 min
+/// headway over 48 h is 2 880; a 1 s headway over 48 h (172 800) is refused.
+pub const MAX_FREQUENCY_TRIPS_PER_ROW: u64 = 10_000;
+/// Most trips all frequencies.txt rows together may generate.
+pub const MAX_FREQUENCY_TRIPS: u64 = 200_000;
+/// Most stop times all generated trips together may have.
+pub const MAX_FREQUENCY_STOP_TIMES: u64 = 5_000_000;
+
 /// Normalises, validates and builds patterns for a feed.
 ///
 /// Trips with errors are left out and listed in the report; the timetable
@@ -31,7 +39,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
 
     let (stops, stop_idx) = build_stops(feed, &mut report);
     let (routes, route_idx) = build_routes(feed);
-    let (services, service_idx) = build_services(feed);
+    let (services, service_idx) = build_services(feed, &mut report);
     let (valid_from, valid_to) = validity(&services).ok_or(GtfsError::NoServiceDates)?;
 
     // Trips, sorted by id for deterministic output.
@@ -39,6 +47,8 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
     trip_ids.sort();
     let mut trips = Vec::new();
     let mut stop_times = Vec::new();
+    // Trips and stop times generated from frequencies.txt so far (capped).
+    let (mut gen_trips, mut gen_times) = (0u64, 0u64);
     for id in trip_ids {
         let raw = &g.trips[id];
         let Some(&route) = route_idx.get(raw.route_id.as_str()) else {
@@ -80,18 +90,58 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
                 continue;
             }
             let approximate = !matches!(f.exact_times, Some(ExactTimes::ScheduleBased));
+            // Count before generating anything, so a crafted row costs no memory.
+            let rows = u64::from(f.end_time - f.start_time).div_ceil(u64::from(f.headway_secs));
+            // Every shifted time must fit in u32: check the earliest (first
+            // start) and the latest (last start) once, before generating.
+            // ≤ end_time - 1, so no overflow.
+            let last_start =
+                f.start_time + (f.end_time - f.start_time - 1) / f.headway_secs * f.headway_secs;
+            let lo = times
+                .iter()
+                .map(|st| st.arrival.0.min(st.departure.0))
+                .min();
+            let hi = times
+                .iter()
+                .map(|st| st.arrival.0.max(st.departure.0))
+                .max();
+            let fits = |t: Option<u32>, start: i64| {
+                t.is_some_and(|t| u32::try_from(i64::from(t) + start - base).is_ok())
+            };
+            if !fits(lo, i64::from(f.start_time)) || !fits(hi, i64::from(last_start)) {
+                report.add(IssueKind::InvalidFrequency, 1, id.as_str());
+                continue;
+            }
+            gen_trips += rows;
+            gen_times += rows * times.len() as u64;
+            if rows > MAX_FREQUENCY_TRIPS_PER_ROW
+                || gen_trips > MAX_FREQUENCY_TRIPS
+                || gen_times > MAX_FREQUENCY_STOP_TIMES
+            {
+                return Err(GtfsError::TooManyFrequencyTrips(format!(
+                    "trip {id}: {rows} trips from one row ({gen_trips} in all, {gen_times} stop times); \
+                     caps {MAX_FREQUENCY_TRIPS_PER_ROW} per row, {MAX_FREQUENCY_TRIPS} trips, \
+                     {MAX_FREQUENCY_STOP_TIMES} stop times"
+                )));
+            }
             let mut n = 0;
             for start in (f.start_time..f.end_time).step_by(f.headway_secs as usize) {
                 let shift = i64::from(start) - base;
-                let moved = |s: Seconds| Seconds((i64::from(s.0) + shift).max(0) as u32);
-                let shifted: Vec<StopTime> = times
+                // Checked above; a time that still does not fit ends the row.
+                let moved = |s: Seconds| u32::try_from(i64::from(s.0) + shift).ok().map(Seconds);
+                let Some(shifted) = times
                     .iter()
-                    .map(|st| StopTime {
-                        arrival: moved(st.arrival),
-                        departure: moved(st.departure),
-                        ..*st
+                    .map(|st| {
+                        Some(StopTime {
+                            arrival: moved(st.arrival)?,
+                            departure: moved(st.departure)?,
+                            ..*st
+                        })
                     })
-                    .collect();
+                    .collect::<Option<Vec<StopTime>>>()
+                else {
+                    break;
+                };
                 push(format!("{id}@{}", Seconds(start)), &shifted, approximate);
                 n += 1;
             }
@@ -101,6 +151,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
         }
     }
 
+    let transfers = build_transfers(feed, &stops, &stop_idx, &mut report);
     let mut tt = Timetable {
         stops,
         routes,
@@ -108,7 +159,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
         stop_times,
         services,
         patterns: Vec::new(),
-        transfers: build_transfers(feed, &stop_idx, &mut report),
+        transfers,
         timezone,
         valid_from,
         valid_to,
@@ -128,42 +179,109 @@ fn pickup_drop_off(t: gtfs_structures::PickupDropOffType) -> u8 {
     }
 }
 
-/// transfers.txt rows whose both stops exist, sorted by (from, to).
-/// Types other than 0–3 (e.g. in-seat transfers) are left out for now.
-/// Several rows for one (from, to): the one with the longest
+/// transfers.txt, read tolerantly (M5 decisions): rows whose both stops
+/// exist and whose `transfer_type` is 0–3 (empty = 0), sorted by (from, to).
+/// Skipped with a report warning: types 4/5 and unknown or unreadable types,
+/// rows with trip or route columns (GTFS extension), unknown stops.
+/// Type 0 ignores `min_transfer_time` (footpath time), type 1 is 0 s, type 2
+/// without a time falls back to the footpath time (stored as type 0) with a
+/// `MissingMinTransferTime` warning; an unparsable time ("x", negative, over
+/// u32) counts as missing.
+/// Several rows for one (from, to): the one with the longest given
 /// `min_transfer_time` is kept (ties: the higher `transfer_type`, so "not
 /// possible" wins), never promising a quicker change than the agency says;
 /// the others are counted in the report.
 fn build_transfers(
     feed: &RawFeed,
+    stops: &[Stop],
     stop_idx: &HashMap<&str, StopIdx>,
     report: &mut ReportBuilder,
 ) -> Vec<Transfer> {
-    use gtfs_structures::TransferType::*;
-    let mut out = Vec::new();
-    for (from_id, stop) in &feed.gtfs.stops {
-        let Some(&from) = stop_idx.get(from_id.as_str()) else {
+    let Some(text) = &feed.transfers else {
+        return Vec::new();
+    };
+    let mut csv = csv::ReaderBuilder::new()
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(text.as_bytes());
+    let header: Vec<String> = match csv.headers() {
+        Ok(h) => h
+            .iter()
+            .map(|x| x.trim_start_matches('\u{feff}').to_string())
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    let col = |name: &str| header.iter().position(|h| h == name);
+    let (c_from, c_to, c_kind, c_min) = (
+        col("from_stop_id"),
+        col("to_stop_id"),
+        col("transfer_type"),
+        col("min_transfer_time"),
+    );
+    let extension: Vec<usize> = ["from_trip_id", "to_trip_id", "from_route_id", "to_route_id"]
+        .iter()
+        .filter_map(|n| col(n))
+        .collect();
+    // (row, given min_transfer_time for the duplicate rule, from id, to id)
+    let mut out: Vec<(Transfer, u32, String, String)> = Vec::new();
+    for (line, rec) in csv.records().enumerate() {
+        let example = format!("transfers.txt row {}", line + 2);
+        let Ok(rec) = rec else {
+            report.add(IssueKind::UnsupportedTransfer, 1, example);
             continue;
         };
-        for t in &stop.transfers {
-            let Some(&to) = stop_idx.get(t.to_stop_id.as_str()) else {
-                continue;
-            };
-            let kind = match t.transfer_type {
-                Recommended => 0,
-                Timed => 1,
-                MinTime => 2,
-                Impossible => 3,
-                _ => continue,
-            };
-            let row = Transfer {
-                from,
-                to,
-                kind,
-                min_secs: t.min_transfer_time.unwrap_or(0),
-            };
-            out.push((row, from_id.as_str(), t.to_stop_id.as_str()));
+        let get = |c: Option<usize>| c.and_then(|c| rec.get(c)).unwrap_or("");
+        if extension
+            .iter()
+            .any(|&c| rec.get(c).is_some_and(|v| !v.is_empty()))
+        {
+            report.add(IssueKind::UnsupportedTransfer, 1, example);
+            continue;
         }
+        let kind: u8 = match get(c_kind) {
+            "" | "0" => 0,
+            "1" => 1,
+            "2" => 2,
+            "3" => 3,
+            _ => {
+                report.add(IssueKind::UnsupportedTransfer, 1, example);
+                continue;
+            }
+        };
+        let (from_id, to_id) = (get(c_from), get(c_to));
+        let (Some(&from), Some(&to)) = (stop_idx.get(from_id), stop_idx.get(to_id)) else {
+            report.add(
+                IssueKind::UnknownTransferStop,
+                1,
+                format!("{from_id}→{to_id}"),
+            );
+            continue;
+        };
+        let given: Option<u32> = get(c_min).parse().ok();
+        let walk = || walk_secs(stops[from.index()].pos, stops[to.index()].pos);
+        let (kind, min_secs) = match (kind, given) {
+            (0, _) => (0, walk()),
+            (1, _) => (1, 0),
+            (2, Some(t)) => (2, t),
+            (2, None) => {
+                report.add(
+                    IssueKind::MissingMinTransferTime,
+                    1,
+                    format!("{from_id}→{to_id}"),
+                );
+                (0, walk())
+            }
+            (k, t) => (k, t.unwrap_or(0)),
+        };
+        // Types 0 and 1 ignore the given time, also for the duplicate rule.
+        let rank = if matches!(kind, 2 | 3) { min_secs } else { 0 };
+        let row = Transfer {
+            from,
+            to,
+            kind,
+            min_secs,
+        };
+        out.push((row, rank, from_id.to_string(), to_id.to_string()));
     }
     // Per (from, to), the row to keep first.
     out.sort_by_key(|r| {
@@ -171,7 +289,7 @@ fn build_transfers(
         (
             t.from,
             t.to,
-            std::cmp::Reverse(t.min_secs),
+            std::cmp::Reverse(r.1),
             std::cmp::Reverse(t.kind),
         )
     });
@@ -180,13 +298,24 @@ fn build_transfers(
             report.add(
                 IssueKind::DuplicateTransfer,
                 1,
-                format!("{}→{}", w[1].1, w[1].2),
+                format!("{}→{}", w[1].2, w[1].3),
             );
         }
     }
     let mut out: Vec<Transfer> = out.into_iter().map(|r| r.0).collect();
     out.dedup_by_key(|t| (t.from, t.to));
     out
+}
+
+/// Straight-line walk between two stops in seconds: metres × 1.3 (detour)
+/// at 1.3 m/s, i.e. one second per straight metre (0 without coordinates).
+fn walk_secs(a: Option<LatLon>, b: Option<LatLon>) -> u32 {
+    let (Some(a), Some(b)) = (a, b) else { return 0 };
+    let (la1, la2) = (a.lat.to_radians(), b.lat.to_radians());
+    let h = ((la2 - la1) / 2.0).sin().powi(2)
+        + la1.cos() * la2.cos() * ((b.lon - a.lon).to_radians() / 2.0).sin().powi(2);
+    let m = 2.0 * 6_371_008.8 * h.sqrt().min(1.0).asin();
+    m.ceil().min(f64::from(u32::MAX / 4)) as u32
 }
 
 /// Stops sorted by id, plus an id → index lookup used during the build.
@@ -282,7 +411,10 @@ fn route_type_code(t: RouteType) -> i16 {
 }
 
 /// Services from calendar.txt and calendar_dates.txt, sorted by id.
-fn build_services(feed: &RawFeed) -> (Vec<Service>, HashMap<&str, ServiceIdx>) {
+fn build_services<'a>(
+    feed: &'a RawFeed,
+    report: &mut ReportBuilder,
+) -> (Vec<Service>, HashMap<&'a str, ServiceIdx>) {
     let g = &feed.gtfs;
     let ids: BTreeSet<&str> = g
         .calendar
@@ -309,7 +441,13 @@ fn build_services(feed: &RawFeed) -> (Vec<Service>, HashMap<&str, ServiceIdx>) {
                         c.saturday,
                         c.sunday,
                     ],
-                    Some((c.start_date, c.end_date)),
+                    // start_date > end_date: no weekday runs (M5 decision).
+                    if c.start_date > c.end_date {
+                        report.add(IssueKind::EmptyDateRange, 1, *id);
+                        None
+                    } else {
+                        Some((c.start_date, c.end_date))
+                    },
                 ),
                 None => ([false; 7], None),
             };
@@ -322,6 +460,14 @@ fn build_services(feed: &RawFeed) -> (Vec<Service>, HashMap<&str, ServiceIdx>) {
             }
             added.sort();
             removed.sort();
+            // Added and removed on one day: removed wins (it does not run).
+            let both = added
+                .iter()
+                .filter(|d| removed.binary_search(d).is_ok())
+                .count();
+            if both > 0 {
+                report.add(IssueKind::ConflictingCalendarDates, both, *id);
+            }
             Service {
                 id: (*id).to_owned(),
                 weekdays,

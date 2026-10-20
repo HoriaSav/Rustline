@@ -35,6 +35,16 @@ pub enum GtfsError {
     /// GTFS requires all agencies of a feed to share one timezone.
     #[error("agencies use different timezones: {0:?}")]
     MixedTimezones(Vec<String>),
+    /// `agency_timezone` is not an IANA timezone name.
+    #[error("agency_timezone {0:?} is not an IANA timezone name (e.g. America/New_York)")]
+    InvalidTimezone(String),
+    /// transfers.txt could not be read (the file itself, not a bad row).
+    #[error("could not read transfers.txt: {0}")]
+    Transfers(String),
+    /// frequencies.txt would generate more trips or stop times than allowed
+    /// (spec §7.2 caps), e.g. a 1 s headway over 48 h.
+    #[error("frequencies.txt expands to too many trips: {0}")]
+    TooManyFrequencyTrips(String),
     /// Neither calendar.txt nor calendar_dates.txt give any date.
     #[error("the feed has no service dates (calendar.txt and calendar_dates.txt are empty)")]
     NoServiceDates,

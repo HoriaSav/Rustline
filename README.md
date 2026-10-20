@@ -156,37 +156,43 @@ cargo test --locked --release -p rustline-osm --test m4_osm -- --ignored --nocap
 Test fixtures live in `data/fixtures/` (`tiny`: a clean feed; `broken`: one of
 each validation error).
 
-## Known gaps (M1, re-targeted in M2)
-Gaps #1, #3, #4 and #5 have an `#[ignore = "Known gap (M1) #N, see README: ..."]` test in
-`crates/rustline-gtfs/tests/edge_cases.rs`. #2 has a test that runs in debug builds only.
-#6 has `duplicate_stop_sequence_is_reported` (passes; it pins today's behaviour). M2 (the pack) did not touch GTFS reading, so #1, #2, #3, #5 and #6 move
-to **M5**, where Rustline gets its own lenient `stop_times`/`trips` reader (spec §7.2).
+## Known gaps (M1, re-targeted in M2 and M5)
+Gaps #1, #3 and #5 have an `#[ignore = "Known gap (M1) #N, see README: ..."]` test in
+`crates/rustline-gtfs/tests/edge_cases.rs`. #2 has a test that runs in debug builds only
+(as does `m5_resources::times_near_u32_max_build_or_fail_cleanly_and_never_panic`).
+#6 has `duplicate_stop_sequence_is_reported` (passes; it pins today's behaviour). #4 is
+fixed in M5 (its test `invalid_timezone_is_rejected` now runs). M5 added an own reader for
+`transfers.txt` only, so #1, #2, #3, #5 and #6 (own lenient `stop_times`/`trips` reader,
+spec §7.2) are proposed for **M8**.
 
 1. **Time range check** – ingest uses gtfs-structures' time parser, so `24:60:00`
-   loads as `25:00:00`. Fix: own reader (M5).
+   loads as `25:00:00`. Fix: own reader (moved to M8, Savin OK 2026-10-18).
 2. **Huge hours** – `9999999:00:00` overflows in the parser. Debug builds give a
    `ParserPanic` error (via `catch_unwind`, which does not help with `panic = "abort"`);
-   release builds wrap silently. Fix: own reader with `checked_*` (M5).
-3. **Duplicate trip_id** – duplicate rows in trips.txt are silently collapsed. Fix: own reader (M5).
-4. **IANA timezone** – `agency_timezone` is not checked against IANA names. Fix: chrono-tz (M5).
+   release builds wrap silently. Fix: own reader with `checked_*` (moved to M8, Savin OK 2026-10-18).
+3. **Duplicate trip_id** – duplicate rows in trips.txt are silently collapsed. Fix: own reader (moved to M8, Savin OK 2026-10-18).
+4. ~~**IANA timezone**~~ – fixed in M5 (chrono-tz): a bad `agency_timezone` fails the
+   build (`InvalidTimezone`) and a pack with one fails `Engine::open`.
 5. **Short CSV rows / strict loading** – rows with fewer fields than the header, dangling ids
    or a missing required file fail the whole feed. Google's `sample-feed-1.zip` fails
-   here for `inspect` and `build-pack`. Fix: own lenient reader (M5).
+   here for `inspect` and `build-pack`. Fix: own lenient reader (moved to M8, Savin OK 2026-10-18). (A
+   `transfers.txt` row with an unknown stop no longer fails the feed since M5.)
 6. **Duplicate stop_sequence** – not reported; the trip may show up as decreasing times.
-   Fix: own reader (M5).
+   Fix: own reader (moved to M8, Savin OK 2026-10-18).
 
 ## Known gaps (M3)
 7. **block_id** – stored in the pack but not used: staying seated from one trip to the
    next of the same block counts as a transfer (2 rides). Test:
    `block_id_is_treated_as_a_normal_transfer`.
-8. **transfers.txt** – rows with `from_trip_id`/`to_trip_id`/route ids are read as plain
-   stop-to-stop rows (gtfs-structures 0.48 drops those columns); types 4/5 (in-seat) are
-   skipped; a row naming an unknown stop makes the whole feed fail to load (same cause as #5).
+8. **transfers.txt** – partly fixed in M5 (own tolerant reader): rows with trip or route
+   ids, types 4/5 (in-seat) and unknown types are skipped with an `UnsupportedTransfer`
+   warning, rows with an unknown stop with `UnknownTransferStop`. Still open: trip/route
+   transfers are not applied (only stop-to-stop rows are).
 9. **Sibling platforms** – platforms of one station are linked only by transfers.txt
    (Leader, M3 decision 8) until M4 footpaths. (A query from/to a parent station uses all
    its platforms with 0 s access.)
-10. **One service day** – trips of the previous service day that run after midnight are
-    not seen (M5).
+(#10, "one service day", is fixed in M5: RAPTOR searches service days D‑1, D and D+1,
+shifted by the real day length around DST.)
 
 (#11, "a self-transfer hides a walk", was fixed in the M3 review round by keeping ride and
 walk arrivals apart; its test `self_transfer_time_does_not_hide_a_faster_walk` now runs.)
@@ -200,6 +206,16 @@ walk arrivals apart; its test `self_transfer_time_does_not_hide_a_faster_walk` n
     as a `DuplicateTransfer` warning in the validation report, and `build-pack` prints
     `warning: N duplicate transfers.txt rows …`. Test:
     `duplicate_transfer_rows_are_counted_and_one_is_kept`.
+
+## Known gaps (M5)
+22. **RAPTOR vs CSA across midnight** – the CSA oracle (`oracle_feature.rs`) is single-day,
+    so multi-day answers are checked only by the M5 hand tests and properties, not against
+    the oracle.
+23. **Frequency caps** – a feed over the caps of spec §7.2 (10 000 trips per row, 200 000
+    trips, 5 000 000 stop times) fails to build instead of being cut down. Tests:
+    `m5_resources::frequency_expansion_over_the_cap_is_a_build_error`,
+    `m5_variants::frequency_row_over_the_cap_is_too_many_frequency_trips`; a feed exactly
+    at the caps builds (`m5_resources::frequency_expansion_at_the_caps_stays_under_512_mib`).
 
 ## Known gaps (M4)
 14. **Departure only** – `TimeSpec` has only `DepartAt` (no arrive-by).

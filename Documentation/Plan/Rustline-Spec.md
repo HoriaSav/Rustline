@@ -169,7 +169,11 @@ sequenceDiagram
 - Normalise: times as **seconds since service-day noon minus 12h** (GTFS definition, see §10) stored as `u32`, allowing >24:00.
 - Build **stop patterns** (group trips by identical stop sequence), sort trips in each pattern by departure.
 - Expand `frequencies.txt` into concrete trips (exact_times=1) or headway trips (exact_times=0 → expand with headway; mark as "approximate").
+  Caps (M5, `rustline-gtfs` `build.rs`, counted before expanding; over a cap the build fails with `GtfsError::TooManyFrequencyTrips`): at most **10 000 trips per frequency row** (`MAX_FREQUENCY_TRIPS_PER_ROW`), **200 000 expanded trips** in total (`MAX_FREQUENCY_TRIPS`) and **5 000 000 expanded stop times** in total (`MAX_FREQUENCY_STOP_TIMES`).
+  Measured at exactly the caps (20 rows × 10 000 trips × 25 stops, `m5_resources::frequency_expansion_at_the_caps_stays_under_512_mib`, 2026-10-18): peak heap **164 MiB** for the build and **256 MiB** for build + pack (debug and release alike), under the 512 MiB limit, so the caps stay as they are.
+  A row with `headway_secs = 0`, `end_time ≤ start_time`, or whose shifted times would not fit in u32 is dropped with an `InvalidFrequency` warning; the feed is kept.
 - Read `transfers.txt`: type 1/2 min times, type 3 forbidden. Treat as overrides on top of computed footpaths.
+  Since M5 (own tolerant reader): type 1 = 0 s; type 2 without a time, or with one that does not parse as a whole number of seconds (e.g. `x`, `-60`, over u32), falls back to the footpath time (straight-line estimate before streets) and warns `MissingMinTransferTime`; trip-to-trip / route rows and unknown types are skipped with `UnsupportedTransfer`; rows with an unknown stop are skipped with `UnknownTransferStop`.
 
 ### 7.3 OSM ingest (`rustline-osm`)
 - Read with a small hand-written PBF reader in `rustline-osm` (decision M4, instead of the `osmpbf` crate [docs.rs](https://docs.rs/osmpbf)): it only needs nodes, way tags and refs, checks every size against `OsmLimits` before use (blob ≤ 32 MiB, lists ≤ `max_blob_bytes / 64` items, node and way counts), never sizes an allocation from a header, and keeps the dependencies to `flate2` on MSRV 1.85. Ways longer than 10 km between two nodes are cut, nodes beyond ±85° are ignored. (`osm4routing` [GitHub](https://github.com/Tristramg/osm4routing2) was the other option considered.)
@@ -241,9 +245,10 @@ Ranking rules (configurable):
 ## 10. Time, calendars, timezone, DST, after midnight
 - Agency timezone from agency.txt; for RATBV `Europe/Bucharest` (EET UTC+2 / EEST UTC+3). Use `chrono` + `chrono-tz` (or `jiff`) at the API boundary only. Internally: `(service_date, seconds)`.
 - GTFS rule: times are measured from "noon minus 12h" of the service day, so on DST change days a time like 03:00 is still well defined [GTFS reference](https://gtfs.org/documentation/schedule/reference/#stop_timestxt). Implement exactly that; test on 2027‑03‑28 and 2026‑10‑25 (EU DST switch dates).
-- After midnight: a query at 00:20 on day D must look at trips of service day D **and** service day D‑1 with times ≥ 24:00. Implementation: RAPTOR runs over a time axis in absolute seconds; for each pattern consider active trips of D‑1 (their times shifted by −86 400 s, i.e. one day earlier) and D (and D+1 for long searches).
+- After midnight: a query at 00:20 on day D must look at trips of service day D **and** service day D‑1 with times ≥ 24:00. Implementation: RAPTOR runs over a time axis in absolute seconds; for each pattern consider active trips of D‑1 (their times shifted by one day earlier) and D (and D+1 for long searches). The shift is the real distance between the days' noon‑minus‑12h references (82 800 / 86 400 / 90 000 s around DST), never a fixed 86 400 s (M5).
 - Services: precomputed per-date bitset over the feed's validity window; `calendar_dates` type 1 adds, type 2 removes.
-- Query outside feed validity → `Error::DateOutsideFeed { valid_from, valid_to }`.
+- Query outside feed validity (decided on the query's local date in the feed zone) → `PlanError::DateOutsideFeed` (a unit variant; the range is in `Engine::info()`); within 14 days of `valid_to` → `Warning::FeedExpiresSoon { valid_to }`.
+- An `agency_timezone` that is not an IANA name fails the build (`GtfsError::InvalidTimezone`) and a pack with one fails `Engine::open` (M5).
 - Response times are ISO‑8601 with offset (e.g. `2026-10-15T08:04:00+03:00`).
 
 ## 11. Public API
@@ -287,11 +292,11 @@ pub enum Leg {
 pub enum PackError { Io, BadMagic, UnsupportedVersion { found: u16, supported: u16 }, Corrupt(String) }
 pub enum PlanError {
     OutsideCoverage { which: Endpoint },          // A or B too far from streets
-    DateOutsideFeed { valid_from: NaiveDate, valid_to: NaiveDate },
+    DateOutsideFeed,                              // the feed's range is in Engine::info()
     NoRoute,                                      // nothing within limits (walk-only too long)
     InvalidRequest(String),
 }
-pub enum Warning { FeedExpiresSoon { on: NaiveDate }, ApproximateFrequencyTrip, StopNotLinkedToStreets(String) }
+pub enum Warning { FeedExpiresSoon { valid_to: NaiveDate }, ApproximateFrequencyTrip, StopNotLinkedToStreets(String) }
 ```
 
 ### 11.3 Dart (via FRB, `rustline-ffi`)
@@ -333,6 +338,18 @@ Errors: HTTP 400 `{"error":"INVALID_REQUEST"}`, 404 `NO_ROUTE`, 422 `OUTSIDE_COV
 | Native library size per ABI (arm64) | < 4 MB stripped, release, LTO |
 | Pack size compressed (Brașov) | < 10 MB |
 | Pack build time on PC | < 60 s |
+
+Measured in M5 (2026-10-18, PC: 11th Gen Intel Core i7-11700K @ 3.60GHz, 16 threads; release, stop-to-stop door to door without streets, one thread):
+
+| Measurement | Value |
+|---|---|
+| Brașov p50 / p95 (`cargo bench -p rustline-core --bench plan`, 1 000 fixed queries, fixed seed, all hours) | 0.33 ms / 0.57 ms (1 000 queries: 317 ms) |
+| Brașov p95 night (23:00–02:00, D‑1/D/D+1) vs midday (11:00–14:00), `m5_properties` | 0.47 ms vs 0.55 ms (ratio 0.85, ≤ 3× holds) |
+| MBTA p95 night vs midday, `m5_properties` | 9.8 ms vs 10.3 ms (ratio 0.95) |
+| Peak RSS, bench process (Brașov build + engine + 1 000 queries) | 51 MiB |
+| Peak RSS, `m5_properties` p95 test (Brașov + MBTA builds) | 753 MiB (mostly the MBTA feed build) |
+
+
 Release profile: `opt-level=3`, `lto="fat"`, `codegen-units=1`, `panic="abort"` (except in FFI where we catch panics), `strip=true`. Ship only `arm64-v8a` (+ `armeabi-v7a`, `x86_64` if needed) via Android App Bundle splits.
 
 ## 13. Integration with RoTransit

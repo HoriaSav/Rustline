@@ -12,6 +12,8 @@ rustline-pack = { path = "../rustline-pack" }
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # Same error-enum helper the other crates use (already in Cargo.lock).
 thiserror = "2.0.21"
+# The feed's IANA timezone: query instants ↔ service-day times (plan M5 step 1).
+chrono-tz = "0.10"
 
 [features]
 # A slow connection-scan router used only to check RAPTOR's answers.
@@ -22,4 +24,15 @@ oracle = []
 rustline-gtfs = { path = "../rustline-gtfs" }
 # Golden journey snapshots (plan M3 decision 10); tests only.
 insta = "1.43"
+# Property tests (plan M5 step 8, spec §15); tests only.
+proptest = { version = "1", default-features = false, features = ["std"] }
+# Benchmarks (plan M5 step 8, `cargo bench -p rustline-core`); 0.5 builds on
+# Rust 1.85. No plots, no rayon: only the timing harness.
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "plan"
+# The workspace keeps its benches in the top-level benches/ folder.
+path = "../../benches/plan.rs"
+harness = false
 

@@ -448,7 +448,8 @@ impl Streets {
             let c = y * self.nx;
             self.cell_start[c + x0] as usize..self.cell_start[c + x1 + 1] as usize
         });
-        let entries: usize = rows.clone().map(|r| r.len()).sum();
+        // Saturating: a tampered cell_start cannot wrap the count below the budget.
+        let entries = rows.clone().fold(0usize, |n, r| n.saturating_add(r.len()));
         if entries > budget {
             return Err(entries);
         }

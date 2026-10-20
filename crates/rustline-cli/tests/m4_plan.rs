@@ -670,9 +670,12 @@ fn one_ride_answers_match_a_brute_force_from_m3() {
             (Err(err), _) => panic!("{a:?}->{b:?} @{dep}: {err:?}, brute {brute:?}"),
         };
         let walk = walk_secs(&rg, &osm, a, b).map(|w| dep + w);
+        // The oracle searches Wednesday's service only; since M5 the engine also
+        // rides Thursday's trips (D+1), which arrive after midnight (no trip of
+        // this feed runs past 24:00), so those are left out (Builder, M5).
         let one = its
             .iter()
-            .filter(|i| i.rides == 1)
+            .filter(|i| i.rides == 1 && arr(i) < 86_400.0)
             .map(arr)
             .fold(f64::INFINITY, f64::min);
         if let Some(bt) = brute {
@@ -692,6 +695,83 @@ fn one_ride_answers_match_a_brute_force_from_m3() {
     }
     println!("compared {compared}, skipped (rounding-sensitive) {skipped}");
     assert!(compared > 150, "{compared}");
+}
+
+#[test]
+fn one_ride_answers_match_a_brute_force_over_days_d_minus_1_to_d_plus_1() {
+    // Added by Builder (M5 review): the brute force above, run on the services of
+    // Tuesday, Wednesday and Thursday shifted by one day (the line city is UTC, so
+    // 86 400 s), for departures late on Wednesday, just after its midnight and in
+    // the morning peak (where the test above finds Thursday rides).
+    let (_c, e) = city();
+    let osm = line_city_osm();
+    let rg = RefGraph::from_osm(&osm);
+    let nodes = main_nodes(&osm);
+    let south: Vec<_> = nodes.iter().copied().filter(|p| p.0 < 1.012).collect();
+    let north: Vec<_> = nodes
+        .iter()
+        .copied()
+        .filter(|p| p.0 > 1.025 && p.0 < 1.045)
+        .collect();
+    let mut rng = Rng(0x4D35_D3D3);
+    let (mut compared, mut checked, mut next_day) = (0, 0, 0);
+    'pairs: for i in 0..300 {
+        let pick = |v: &[(f64, f64)], rng: &mut Rng| v[rng.below(v.len() as u64) as usize];
+        let (a, b) = (pick(&south, &mut rng), pick(&north, &mut rng));
+        let dep = match i % 3 {
+            0 => t(22, 30, 0) + rng.below(5400) as f64,
+            1 => rng.below(3600) as f64,
+            _ => t(7, 50, 0) + rng.below(3000) as f64,
+        };
+        let mut brute: Option<f64> = None;
+        for k in [-1i64, 0, 1] {
+            let shift = 86_400.0 * k as f64;
+            let day = wed() + chrono::Duration::days(k);
+            match brute_one_ride(&e, &rg, &osm, a, b, day, dep - shift, 1000.0) {
+                Err(()) => continue 'pairs,
+                Ok(Some(x)) => brute = Some(brute.map_or(x + shift, |y: f64| y.min(x + shift))),
+                Ok(None) => {}
+            }
+        }
+        let r = req(
+            a,
+            b,
+            at(wed(), 0, 0, 0) + chrono::Duration::seconds(dep as i64),
+        );
+        let its = match plan(&e, &r) {
+            Ok(its) => its,
+            Err(PlanError::NoRoute) if brute.is_none() => continue,
+            Err(err) => panic!("{a:?}->{b:?} @{dep}: {err:?}, brute {brute:?}"),
+        };
+        let one = its
+            .iter()
+            .filter(|i| i.rides == 1)
+            .map(arr)
+            .fold(f64::INFINITY, f64::min);
+        // Never better than the brute force over the three days …
+        match brute {
+            Some(bt) => assert!(one >= bt - 2.0, "{a:?}->{b:?} @{dep}: {one} < brute {bt}"),
+            None => assert!(one.is_infinite(), "{a:?}->{b:?} @{dep}: {one}, brute none"),
+        }
+        checked += 1;
+        // … and equal to it when the engine keeps a 1-ride or walking is not better.
+        let walk = walk_secs(&rg, &osm, a, b).map(|w| dep + w);
+        if let Some(bt) = brute {
+            if one.is_finite() || walk.is_none_or(|w| w > bt + 2.0) {
+                assert!(
+                    close(one, bt, 0.0, 2.0),
+                    "{a:?}->{b:?} @{dep}: engine 1-ride {one}, brute {bt}, walk {walk:?}"
+                );
+                compared += 1;
+                next_day += usize::from(bt >= 86_400.0);
+            }
+        }
+    }
+    println!("checked {checked}, compared {compared} ({next_day} on Thursday)");
+    assert!(
+        checked > 150 && compared > 50 && next_day > 10,
+        "{checked}, {compared}, {next_day}"
+    );
 }
 
 #[test]

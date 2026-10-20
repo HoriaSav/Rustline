@@ -1,0 +1,25 @@
+name: Bench
+
+# Manual only (plan M5 step 8): timings on shared runners are noisy, so the
+# numbers in spec §12 come from a local run; this job is for spot checks.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: cargo bench (plan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch fixtures
+        run: scripts/fetch-fixtures.sh
+      - name: Bench
+        run: cargo bench --locked -p rustline-core --bench plan

@@ -11,7 +11,14 @@
 //! - changing to another stop: a transfers.txt row (types 0/1/2 with
 //!   `min_transfer_time`, type 3 never), else the pack's precomputed
 //!   footpath (M4) when it is short enough;
-//! - `pickup_type` / `drop_off_type` 1 forbid boarding / getting off there.
+//! - `pickup_type` / `drop_off_type` 1 forbid boarding / getting off there;
+//! - (M5) transfers.txt type 0 rows take the pack footpath for the pair when
+//!   there is one, else their stored straight-line time; type 1 rows are 0 s.
+//!
+//! Service days (M5): a search runs in one time frame and may use the trips
+//! of up to three service days, each shifted into that frame by the real
+//! distance between the days' "noon minus 12 h" references (82 800, 86 400 or
+//! 90 000 s around DST). Stop to stop ([`raptor_stop_to_stop`]) uses one day.
 
 use chrono::NaiveDate;
 use rustline_model::{Journey, Leg, RouteIdx, Seconds, StopIdx, TripIdx};
@@ -58,6 +65,8 @@ pub enum QueryError {
 struct RideLabel {
     /// Trip ridden, got off at pattern position `alight`.
     trip: u32,
+    /// Which service day of the search (index into `Search::days`).
+    slot: u8,
     /// Boarded at pattern position `board`, with the boarding time coming
     /// from round `from_round`, arrival kind `from_walk`.
     board: u32,
@@ -184,27 +193,34 @@ pub fn raptor_pareto(
     }
     let starts: Vec<(u32, u32)> = origins.iter().map(|&o| (o, dep.0)).collect();
     let ends: Vec<(u32, u32)> = targets.iter().map(|&t| (t, 0)).collect();
-    Ok(
-        raptor_multi(pack, day, max_transfers, &starts, &ends, Hops::DEFAULT)?
-            .into_iter()
-            .map(|f| f.journey)
-            .collect(),
-    )
+    Ok(raptor_multi(
+        pack,
+        &[(day, 0)],
+        max_transfers,
+        &starts,
+        &ends,
+        Hops::DEFAULT,
+    )?
+    .into_iter()
+    .map(|f| f.journey)
+    .collect())
 }
 
 /// RAPTOR from several origin stops, each with its own earliest time, to
 /// several target stops, each with an egress time added to the arrival.
 /// One journey per number of rides that improves the best arrival.
+/// `days`: the service days to use, as (day index, shift in seconds into the
+/// search's time frame); at most 3 (more are ignored).
 pub(crate) fn raptor_multi(
     pack: &Pack,
-    day: u32,
+    days: &[(u32, u32)],
     max_transfers: u8,
     origins: &[(u32, u32)],
     targets: &[(u32, u32)],
     hops: Hops,
 ) -> Result<Vec<Found>, QueryError> {
     let rounds = usize::from(max_transfers.min(MAX_TRANSFERS)) + 1;
-    let mut search = Search::new(pack, day, rounds, hops);
+    let mut search = Search::new(pack, &days[..days.len().min(3)], rounds, hops);
     for &(t, e) in targets {
         let cell = search.egress.get_mut(t as usize).ok_or(BAD)?;
         *cell = (*cell).min(e);
@@ -233,7 +249,8 @@ fn platforms(pack: &Pack, stop: StopIdx) -> Vec<u32> {
 /// walk arrival (or the origin) can board without the stop's own change time.
 struct Search<'a> {
     tt: &'a TimetableData,
-    day: u32,
+    /// (service day index, shift into the search's frame), at most 3.
+    days: &'a [(u32, u32)],
     rounds: usize,
     n: usize,
     /// Egress time of each destination stop (`NONE`: not a destination).
@@ -263,13 +280,13 @@ struct Search<'a> {
 const BAD: QueryError = QueryError::BadPack("index out of range");
 
 impl<'a> Search<'a> {
-    fn new(pack: &'a Pack, day: u32, rounds: usize, hops: Hops) -> Self {
+    fn new(pack: &'a Pack, days: &'a [(u32, u32)], rounds: usize, hops: Hops) -> Self {
         let tt = pack.timetable();
         let n = tt.stop_count();
         let cells = (rounds + 1) * n;
         Search {
             tt,
-            day,
+            days,
             rounds,
             n,
             egress: vec![NONE; n],
@@ -392,16 +409,16 @@ impl<'a> Search<'a> {
                 .pattern_trips
                 .get(csr(&tt.pattern_trips_start, p as usize))
                 .unwrap_or(&[]);
-            // (position in `trips`, boarding position, round and kind of the boarding time)
-            let mut on: Option<(usize, usize, u8, bool)> = None;
+            // (position in `trips`, day slot, boarding position, round and kind of the boarding time)
+            let mut on: Option<(usize, u8, usize, u8, bool)> = None;
             for (i, &s) in stops.iter().enumerate().skip(first) {
                 let s = s as usize;
                 if s >= self.n {
                     return Err(BAD);
                 }
-                if let Some((t, board, from_round, from_walk)) = on {
+                if let Some((t, slot, board, from_round, from_walk)) = on {
                     let trip = *trips.get(t).ok_or(BAD)?;
-                    let (a, _) = self.times(trip, i);
+                    let (a, _) = self.shifted(trip, i, slot);
                     let bound = self.best_ride[s].min(self.best_target);
                     if a < bound && self.drop_off(trip, i) != 1 {
                         if self.ride[row + s] == NONE {
@@ -411,6 +428,7 @@ impl<'a> Search<'a> {
                         self.best_ride[s] = a;
                         self.ride_label[row + s] = Some(RideLabel {
                             trip,
+                            slot,
                             board: board as u32,
                             alight: i as u32,
                             from_round,
@@ -423,26 +441,60 @@ impl<'a> Search<'a> {
                 if r == NONE || usize::from(self.ready_round[s]) >= k {
                     continue;
                 }
-                let limit = on.map_or(trips.len(), |(t, ..)| t);
-                if let Some(t) = self.earliest_trip(trips, i, r, limit) {
-                    on = Some((t, i, self.ready_round[s], self.ready_walk[s]));
+                // Only switch to a trip that leaves here earlier (ties: the
+                // lower day slot, then the lower position; within one day
+                // trips are sorted, so this is "an earlier trip").
+                let now = on.map(|(t, slot, ..)| (self.shifted(trips[t], i, slot).1, slot, t));
+                if let Some((d, slot, t)) = self.earliest_trip(trips, i, r) {
+                    if now.is_none_or(|n| (d, slot, t) < n) {
+                        on = Some((t, slot, i, self.ready_round[s], self.ready_walk[s]));
+                    }
                 }
             }
         }
         Ok(improved)
     }
 
-    /// First trip (position in `trips`, below `limit`) that leaves position
-    /// `i` at `r` or later, runs today and lets people board there.
-    fn earliest_trip(&self, trips: &[u32], i: usize, r: u32, limit: usize) -> Option<usize> {
-        let trips = trips.get(..limit)?;
-        // Trips of a pattern never overtake, so departures are sorted.
-        let start = trips.partition_point(|&t| self.times(t, i).1 < r);
-        (start..trips.len()).find(|&t| {
-            let trip = trips[t] as usize;
-            let service = self.tt.trip_service.get(trip).copied().unwrap_or(NONE);
-            self.pickup(trips[t], i) != 1 && self.tt.service_runs(service as usize, self.day)
-        })
+    /// The earliest trip that leaves position `i` at `r` or later (in the
+    /// search frame), runs on its service day and lets people board there:
+    /// (departure in the frame, day slot, position in `trips`). One binary
+    /// search per service day, so three days cost at most three times one.
+    fn earliest_trip(&self, trips: &[u32], i: usize, r: u32) -> Option<(u32, u8, usize)> {
+        let mut best: Option<(u32, u8, usize)> = None;
+        for (slot, &(day, shift)) in self.days.iter().enumerate() {
+            let slot = slot as u8;
+            // That day's own time for r (before its start: from its first trip).
+            let local = r.saturating_sub(shift);
+            // Trips of a pattern never overtake, so departures are sorted.
+            let start = trips.partition_point(|&t| self.times(t, i).1 < local);
+            let found = (start..trips.len()).find(|&t| {
+                let trip = trips[t] as usize;
+                let service = self.tt.trip_service.get(trip).copied().unwrap_or(NONE);
+                self.pickup(trips[t], i) != 1 && self.tt.service_runs(service as usize, day)
+            });
+            if let Some(t) = found {
+                let d = self.shifted(trips[t], i, slot).1;
+                if d != NONE && d >= r && best.is_none_or(|b| (d, slot, t) < b) {
+                    best = Some((d, slot, t));
+                }
+            }
+        }
+        best
+    }
+
+    /// (arrival, departure) of a trip at a position, in the search frame
+    /// (`NONE` when missing or past `u32`).
+    fn shifted(&self, trip: u32, i: usize, slot: u8) -> (u32, u32) {
+        let shift = self.days.get(usize::from(slot)).map_or(0, |d| d.1);
+        let (a, d) = self.times(trip, i);
+        let up = |t: u32| {
+            if t == NONE {
+                NONE
+            } else {
+                t.checked_add(shift).unwrap_or(NONE)
+            }
+        };
+        (up(a), up(d))
     }
 
     /// One hop (transfers.txt row, else footpath) from stop `x`, which round
@@ -472,6 +524,12 @@ impl<'a> Search<'a> {
             if y >= self.n {
                 return Err(BAD);
             }
+            // Type 0: the pack's footpath for the pair when it has one.
+            let secs = if kind == 0 {
+                self.footpath_secs(x, y).unwrap_or(secs)
+            } else {
+                secs
+            };
             self.walk_to(row, x, y, at, secs, improved);
         }
         let rows = tt.transfers(x);
@@ -495,6 +553,16 @@ impl<'a> Search<'a> {
             self.walk_to(row, x, y as usize, at, secs, improved);
         }
         Ok(())
+    }
+
+    /// The pack footpath x → y at this query's speed, if there is one.
+    fn footpath_secs(&self, x: usize, y: usize) -> Option<u32> {
+        let tt = self.tt;
+        tt.footpaths(x).find_map(|f| {
+            (tt.footpath_to.get(f) == Some(&(y as u32)))
+                .then(|| tt.footpath_secs.get(f).map(|&s| self.hops.secs(s)))
+                .flatten()
+        })
     }
 
     fn walk_to(
@@ -677,8 +745,8 @@ impl<'a> Search<'a> {
                     trip: TripIdx(l.trip),
                     from: StopIdx(b),
                     to: StopIdx(s as u32),
-                    dep: Seconds(self.times(l.trip, l.board as usize).1),
-                    arr: Seconds(self.times(l.trip, l.alight as usize).0),
+                    dep: Seconds(self.shifted(l.trip, l.board as usize, l.slot).1),
+                    arr: Seconds(self.shifted(l.trip, l.alight as usize, l.slot).0),
                 });
                 rides += 1;
                 s = b as usize;

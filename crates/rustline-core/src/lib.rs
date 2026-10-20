@@ -1,5 +1,6 @@
 //! The journey planner engine. M2: opening a pack; M3: RAPTOR stop to
-//! stop; M4: door to door with walking ([`Engine::plan`]).
+//! stop; M4: door to door with walking ([`Engine::plan`]); M5: time zones,
+//! DST and after-midnight trips (D − 1 / D / D + 1).
 
 use std::path::Path;
 
@@ -9,17 +10,19 @@ pub mod oracle;
 mod plan;
 mod raptor;
 mod street;
+mod time;
 
 pub use build::{add_walking, StreetInput, WalkingReport, LINK_MAX_M};
 pub use plan::{
     Itinerary, Leg, PlanError, PlanRequest, PlanResponse, Polyline, StopRef, TimeSpec, Warning,
-    DETOUR_FACTOR, MAX_ACCESS_M, MAX_TRANSFER_M, MAX_WALK_SPEED_MPS, SNAP_MAX_M, WALK_BONUS_SECS,
-    WALK_ONLY_MAX_M,
+    DETOUR_FACTOR, EXPIRES_SOON_DAYS, MAX_ACCESS_M, MAX_TRANSFER_M, MAX_WALK_SPEED_MPS, SNAP_MAX_M,
+    WALK_BONUS_SECS, WALK_ONLY_MAX_M,
 };
 pub use raptor::{
     raptor_pareto, raptor_stop_to_stop, QueryError, MAX_TRANSFERS, MORE_RIDES_MIN_GAIN_SECS,
 };
 pub use street::SEARCH_CAP_M;
+pub use time::{local_instant, to_service_time};
 
 use rustline_pack::{read_pack, read_pack_with_limit, Pack, PackError};
 
@@ -27,6 +30,8 @@ use rustline_pack::{read_pack, read_pack_with_limit, Pack, PackError};
 pub struct Engine {
     pack: Pack,
     streets: Option<street::Streets>,
+    /// The feed's timezone, parsed once (M5 step 1).
+    tz: chrono_tz::Tz,
 }
 
 /// What a loaded pack contains.
@@ -83,11 +88,21 @@ impl Engine {
     }
 
     /// Wraps a checked pack (builds the street indexes). A street graph whose
-    /// index would be too big is [`PackError::Corrupt`].
+    /// index would be too big, or a timezone that is not an IANA name, is
+    /// [`PackError::Corrupt`].
     pub fn new(pack: Pack) -> Result<Engine, PackError> {
+        let name = &pack.meta().timezone;
+        let tz: chrono_tz::Tz = name.parse().map_err(|_| {
+            PackError::Corrupt(format!("timezone {name:?} is not an IANA timezone name"))
+        })?;
         let streets =
             street::Streets::new(pack.timetable(), LINK_MAX_M).map_err(PackError::Corrupt)?;
-        Ok(Engine { pack, streets })
+        Ok(Engine { pack, streets, tz })
+    }
+
+    /// The feed's timezone.
+    pub fn timezone(&self) -> chrono_tz::Tz {
+        self.tz
     }
 
     /// Opens a pack in memory whose body may be up to `max_body_bytes`
@@ -115,7 +130,7 @@ impl Engine {
 
     /// Door-to-door itineraries; see [`PlanRequest`] and the `plan` module docs.
     pub fn plan(&self, req: &PlanRequest) -> Result<PlanResponse, PlanError> {
-        plan::plan(&self.pack, self.streets.as_ref(), req)
+        plan::plan(&self.pack, self.streets.as_ref(), self.tz, req)
     }
 
     /// Counts, sha and validity of the loaded pack.

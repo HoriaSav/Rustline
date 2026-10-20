@@ -5,7 +5,7 @@
 //! rustline bbox --gtfs <feed.zip|dir> [--margin-km <km>]
 //! rustline build-pack --gtfs <feed.zip|dir> --out <dir> [--osm <extract.osm.pbf> [--bbox <min_lon,min_lat,max_lon,max_lat>]]
 //!                     [--feed-id <id>] [--built-at <unix>]
-//! rustline plan --pack <pack> --from <lat,lon> --to <lat,lon> --at <YYYY-MM-DDTHH:MM[:SS]> [--geojson <file>]
+//! rustline plan --pack <pack> --from <lat,lon> --to <lat,lon> --at <YYYY-MM-DDTHH:MM[:SS][±HH:MM|Z]> [--geojson <file>]
 //! rustline plan --pack <pack> --from-stop <stop_id> --to-stop <stop_id> --at <YYYY-MM-DDTHH:MM[:SS]>
 //! ```
 
@@ -105,8 +105,10 @@ enum Command {
         /// Write the itineraries as GeoJSON (a FeatureCollection of LineStrings).
         #[arg(long)]
         geojson: Option<PathBuf>,
-        /// Service day and departure time, e.g. 2030-01-02T08:00 (times past
-        /// midnight belong to the next service day).
+        /// Departure, e.g. 2030-01-02T08:00. Door to door: local time in the
+        /// feed's zone, or with an offset (2030-01-02T08:00+02:00, …Z); an
+        /// ambiguous local time takes the earlier instant, one in a DST gap
+        /// moves forward past it. Stop to stop: service day and time.
         #[arg(long)]
         at: String,
         /// Most transfers to use (capped at 8; door to door defaults to 3).
@@ -464,9 +466,20 @@ fn door_to_door(
         Ok(p)
     };
     let (a, b) = (point(from, "--from")?, point(to, "--to")?);
-    let at = parse_at(at)?;
+    let offset_at = ["%Y-%m-%dT%H:%M:%S%:z", "%Y-%m-%dT%H:%M%:z"]
+        .iter()
+        .find_map(|f| chrono::DateTime::parse_from_str(&at.replace('Z', "+00:00"), f).ok());
+    let local_at = if offset_at.is_none() {
+        Some(parse_at(at)?)
+    } else {
+        None
+    };
     let engine =
         rustline_core::Engine::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let at = match offset_at {
+        Some(t) => t,
+        None => rustline_core::local_instant(engine.timezone(), local_at.unwrap_or_default()),
+    };
     let mut req = rustline_core::PlanRequest {
         from: a,
         to: b,
@@ -477,11 +490,20 @@ fn door_to_door(
         req.max_transfers = m;
     }
     let r = engine.plan(&req)?;
-    println!("{},{} → {},{}, {}", a.lat, a.lon, b.lat, b.lon, at);
+    println!(
+        "{},{} → {},{}, {}",
+        a.lat,
+        a.lon,
+        b.lat,
+        b.lon,
+        at.with_timezone(&engine.timezone()).to_rfc3339()
+    );
     for w in &r.warnings {
         println!("warning: {w:?}");
     }
-    let hm = |t: chrono::NaiveDateTime| t.format("%H:%M:%S").to_string();
+    // Local time in the feed's zone with its offset, so the two 03:30 of a
+    // DST fall-back night can be told apart.
+    let hm = |t: chrono::DateTime<chrono::FixedOffset>| t.format("%H:%M:%S%:z").to_string();
     let stop = |s: &rustline_core::StopRef| {
         if s.name.is_empty() || s.name == s.id {
             s.id.clone()

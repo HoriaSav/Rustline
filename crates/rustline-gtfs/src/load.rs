@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use gtfs_structures::{Gtfs, LocationType};
+use gtfs_structures::{Gtfs, GtfsReader, LocationType};
 use serde::Serialize;
 
 use crate::GtfsError;
@@ -14,13 +14,22 @@ use crate::GtfsError;
 /// parser's types and the parser can be swapped later (spec §7.2).
 pub struct RawFeed {
     pub(crate) gtfs: Gtfs,
+    /// transfers.txt as text (M5): Rustline reads it itself, tolerantly,
+    /// because the parser fails the whole feed on one unknown
+    /// `transfer_type` and drops the trip/route columns.
+    pub(crate) transfers: Option<String>,
 }
 
 /// Loads a GTFS feed from a `.zip` file or an unpacked directory.
 pub fn load(path: &Path) -> Result<RawFeed, GtfsError> {
     // gtfs-structures can panic on bad values (e.g. huge hours), so turn that
     // into an error instead of crashing the caller.
-    let result = std::panic::catch_unwind(|| Gtfs::from_path(path)).map_err(|payload| {
+    let read = || {
+        let mut raw = GtfsReader::default().raw().read_from_path(path)?;
+        raw.transfers = None;
+        Gtfs::try_from(raw)
+    };
+    let result = std::panic::catch_unwind(read).map_err(|payload| {
         // A panic payload is usually a &str or a String; keep its text.
         let message = if let Some(s) = payload.downcast_ref::<&str>() {
             s.to_string()
@@ -38,7 +47,39 @@ pub fn load(path: &Path) -> Result<RawFeed, GtfsError> {
         path: path.to_owned(),
         source,
     })?;
-    Ok(RawFeed { gtfs })
+    let transfers = transfers_text(path).map_err(|e| GtfsError::Transfers(e.to_string()))?;
+    Ok(RawFeed { gtfs, transfers })
+}
+
+/// The text of transfers.txt in a feed directory or zip (`None`: no such file).
+/// In a zip the file may sit in a folder, as the parser allows.
+fn transfers_text(path: &Path) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    let bytes = if path.is_dir() {
+        let p = path.join("transfers.txt");
+        if !p.is_file() {
+            return Ok(None);
+        }
+        std::fs::read(p)?
+    } else {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+        let name = (0..zip.len()).find_map(|i| {
+            let f = zip.by_index(i).ok()?;
+            let n = f.name().to_string();
+            (Path::new(&n).file_name() == Some(std::ffi::OsStr::new("transfers.txt"))).then_some(n)
+        });
+        let Some(name) = name else { return Ok(None) };
+        let mut f = zip.by_name(&name)?;
+        // A real transfers.txt is a few MB at most; refuse a zip bomb.
+        const MAX: u64 = 256 << 20;
+        let mut v = Vec::new();
+        f.by_ref().take(MAX + 1).read_to_end(&mut v)?;
+        if v.len() as u64 > MAX {
+            return Err("transfers.txt is larger than 256 MiB".into());
+        }
+        v
+    };
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// Row counts of the raw feed, as a GTFS validator or the RoTransit
@@ -96,7 +137,8 @@ impl RawFeed {
         }
     }
 
-    /// The timezone from `agency.txt` (`agency_timezone`).
+    /// The timezone from `agency.txt` (`agency_timezone`); it must be an
+    /// IANA name (e.g. `America/New_York`).
     pub fn timezone(&self) -> Result<String, GtfsError> {
         let mut zones: Vec<String> = self
             .gtfs
@@ -108,7 +150,14 @@ impl RawFeed {
         zones.dedup();
         match zones.len() {
             0 => Err(GtfsError::NoAgency),
-            1 => Ok(zones.remove(0)),
+            1 => {
+                let z = zones.remove(0);
+                // An IANA name (M1 gap #4): what the engine converts times with.
+                match z.parse::<chrono_tz::Tz>() {
+                    Ok(_) => Ok(z),
+                    Err(_) => Err(GtfsError::InvalidTimezone(z)),
+                }
+            }
             _ => Err(GtfsError::MixedTimezones(zones)),
         }
     }

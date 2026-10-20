@@ -10,13 +10,21 @@
 //! 5. Walking only, if it is at most [`WALK_ONLY_MAX_M`]: kept when it
 //!    arrives no more than [`WALK_BONUS_SECS`] after the best ride.
 //! 6. Best in (arrival, rides), earliest first, at most `max_results`.
+//!
+//! Time (M5): the query instant's local date D in the feed's zone is the
+//! service date (outside the feed → [`PlanError::DateOutsideFeed`], no D − 1
+//! rescue). RAPTOR runs in the frame of D − 1's "noon minus 12 h" and uses
+//! the trips of D − 1, D and D + 1 that are inside the feed, each shifted by
+//! the real distance between the days. Every output time is an instant with
+//! the feed zone's offset at that moment.
 
-use chrono::{NaiveDate, NaiveDateTime, Timelike};
+use chrono::{DateTime, Days, FixedOffset, NaiveDate};
 use rustline_model::LatLon;
 use rustline_pack::Pack;
 
 use crate::raptor::{raptor_multi, Found, Hops};
 use crate::street::{haversine_m, Snap, Streets, SEARCH_CAP_M};
+use crate::time::{day_ref, Clock};
 use crate::{QueryError, MAX_TRANSFERS, MORE_RIDES_MIN_GAIN_SECS};
 
 /// A point farther than this from every street is outside the coverage
@@ -35,13 +43,17 @@ pub const MAX_ACCESS_M: u32 = 3_000;
 pub const MAX_TRANSFER_M: u32 = 500;
 /// Fastest walking speed a request may ask for (m/s).
 pub const MAX_WALK_SPEED_MPS: f64 = 3.0;
+/// [`Warning::FeedExpiresSoon`] when at most this many days are left from
+/// the query's service date to the feed's last day.
+pub const EXPIRES_SOON_DAYS: i64 = 14;
 
 /// When to travel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeSpec {
-    /// Leave at this local time (feed timezone) or later. The date is the
-    /// service day; times past midnight belong to the next one.
-    DepartAt(NaiveDateTime),
+    /// Leave at this instant or later. Any offset works; the answer is in
+    /// the feed's timezone. (A local wall time without an offset: see
+    /// [`crate::local_instant`].)
+    DepartAt(DateTime<FixedOffset>),
 }
 
 /// A door-to-door query. Limits are checked by [`crate::Engine::plan`];
@@ -69,12 +81,12 @@ pub struct PlanRequest {
 impl Default for PlanRequest {
     /// Spec §11.1 defaults: 1.3 m/s, 1 000 m access, 500 m transfers,
     /// 3 transfers, 5 results. `from`/`to` are (0, 0) and the time is
-    /// 1970-01-01 00:00: set them.
+    /// 1970-01-01 00:00 UTC: set them.
     fn default() -> Self {
         PlanRequest {
             from: LatLon::new(0.0, 0.0),
             to: LatLon::new(0.0, 0.0),
-            time: TimeSpec::DepartAt(NaiveDateTime::default()),
+            time: TimeSpec::DepartAt(DateTime::<FixedOffset>::default()),
             walk_speed_mps: 1.3,
             max_access_m: 1000,
             max_transfer_m: 500,
@@ -126,7 +138,8 @@ pub enum PlanError {
     /// Nothing gets there: no ride, and too far to walk.
     #[error("no route found")]
     NoRoute,
-    /// The date is outside the pack's timetable.
+    /// The query's local date (in the feed's zone) is outside the pack's
+    /// timetable (`valid_from..=valid_to`).
     #[error("the date is outside the timetable of this pack")]
     DateOutsideFeed,
     /// The pack's data does not fit together.
@@ -142,6 +155,14 @@ pub enum Warning {
     StopNotLinkedToStreets(String),
     /// The pack has no street graph: every walk is a straight line × 1.3.
     NoStreetGraph,
+    /// The feed ends within 14 days of the query's service date.
+    FeedExpiresSoon {
+        /// The feed's last service day.
+        valid_to: NaiveDate,
+    },
+    /// An itinerary rides a trip from frequencies.txt with `exact_times=0`:
+    /// the times are an estimate from the headway.
+    ApproximateFrequencyTrip,
 }
 
 /// A stop as itineraries show it.
@@ -177,9 +198,9 @@ pub enum Leg {
     /// Walking.
     Walk {
         /// Start time.
-        start: NaiveDateTime,
+        start: DateTime<FixedOffset>,
         /// End time.
-        end: NaiveDateTime,
+        end: DateTime<FixedOffset>,
         /// Metres walked.
         distance_m: u32,
         /// Stop left (`None`: the origin).
@@ -204,9 +225,9 @@ pub enum Leg {
         /// Alighting stop.
         to_stop: StopRef,
         /// Departure.
-        board: NaiveDateTime,
+        board: DateTime<FixedOffset>,
         /// Arrival.
-        alight: NaiveDateTime,
+        alight: DateTime<FixedOffset>,
         /// The stops passed, as a line (no shapes.txt yet).
         geometry: Option<Polyline>,
     },
@@ -218,9 +239,9 @@ pub struct Itinerary {
     /// Legs in order.
     pub legs: Vec<Leg>,
     /// When to leave the origin.
-    pub departure: NaiveDateTime,
+    pub departure: DateTime<FixedOffset>,
     /// When it reaches the destination.
-    pub arrival: NaiveDateTime,
+    pub arrival: DateTime<FixedOffset>,
     /// Changes between rides (rides − 1; 0 for walking only).
     pub transfers: u8,
     /// Metres walked in total.
@@ -252,17 +273,38 @@ struct End {
 pub(crate) fn plan(
     pack: &Pack,
     streets: Option<&Streets>,
+    tz: chrono_tz::Tz,
     req: &PlanRequest,
 ) -> Result<PlanResponse, PlanError> {
     req.check().map_err(PlanError::InvalidRequest)?;
     let TimeSpec::DepartAt(at) = req.time;
-    let date = at.date();
+    let date = at.with_timezone(&tz).date_naive();
     let meta = pack.meta();
     if date < meta.valid_from || date > meta.valid_to {
         return Err(PlanError::DateOutsideFeed);
     }
-    let day = u32::try_from((date - meta.valid_from).num_days()).unwrap_or(u32::MAX);
-    let dep = at.time().num_seconds_from_midnight();
+    // The search frame starts at D − 1's reference; D − 1, D and D + 1 (those
+    // inside the feed) are shifted into it by their real distance.
+    let prev = date
+        .checked_sub_days(Days::new(1))
+        .ok_or(PlanError::DateOutsideFeed)?;
+    let origin = day_ref(tz, prev);
+    let mut days: Vec<(u32, u32)> = Vec::with_capacity(3);
+    for k in 0..3 {
+        let Some(d) = prev.checked_add_days(Days::new(k)) else {
+            continue;
+        };
+        if d < meta.valid_from || d > meta.valid_to {
+            continue;
+        }
+        let index = u32::try_from((d - meta.valid_from).num_days()).unwrap_or(u32::MAX);
+        let shift = u32::try_from(day_ref(tz, d) - origin).unwrap_or(u32::MAX);
+        days.push((index, shift));
+    }
+    let clock = Clock { origin, tz };
+    let time = |secs: u32| clock.at(secs);
+    let dep = u32::try_from(at.timestamp() - origin)
+        .map_err(|_| PlanError::Internal("query time outside its search frame".into()))?;
     let snap = |p: LatLon| -> Result<End, PlanError> {
         match streets {
             Some(s) => match s.snap(p, SNAP_MAX_M) {
@@ -306,7 +348,7 @@ pub(crate) fn plan(
         };
         found = raptor_multi(
             pack,
-            day,
+            &days,
             req.max_transfers.min(MAX_TRANSFERS),
             &origins,
             &targets,
@@ -333,14 +375,15 @@ pub(crate) fn plan(
     let best_ride = rides.iter().map(|f| f.arrival).min();
     let walk = q.direct(&from, &to);
 
-    let mut out: Vec<(u32, u8, Itinerary)> = Vec::new();
+    // (arrival, rides, itinerary, rides an approximate frequency trip)
+    let mut out: Vec<(u32, u8, Itinerary, bool)> = Vec::new();
     let mut unlinked: Vec<u32> = Vec::new();
     if let Some((w, line)) = walk {
         let arr = dep.saturating_add(w.secs);
         if best_ride.is_none_or(|b| arr <= b.saturating_add(WALK_BONUS_SECS)) {
             let leg = Leg::Walk {
-                start: time(date, dep),
-                end: time(date, arr),
+                start: time(dep),
+                end: time(arr),
                 distance_m: w.metres.round() as u32,
                 from_stop: None,
                 to_stop: None,
@@ -351,11 +394,12 @@ pub(crate) fn plan(
                 0,
                 Itinerary {
                     legs: vec![leg],
-                    departure: time(date, dep),
-                    arrival: time(date, arr),
+                    departure: time(dep),
+                    arrival: time(arr),
                     transfers: 0,
                     walk_m: w.metres.round() as u32,
                 },
+                false,
             ));
         }
     }
@@ -367,24 +411,35 @@ pub(crate) fn plan(
                 "journey without its access or egress".into(),
             ));
         };
-        let it = q.itinerary(date, &from, &to, f, &acc, &egr, &mut unlinked);
-        out.push((f.arrival, f.journey.rides, it));
+        let shifts: Vec<u32> = days.iter().map(|d| d.1).collect();
+        let (it, approx) = q.itinerary(&clock, &shifts, &from, &to, f, &acc, &egr, &mut unlinked);
+        out.push((f.arrival, f.journey.rides, it, approx));
     }
     // Best in (arrival, rides): drop anything another itinerary matches or beats.
     out.sort_by_key(|o| (o.0, o.1));
-    let mut kept: Vec<Itinerary> = Vec::new();
+    let mut kept: Vec<(Itinerary, bool)> = Vec::new();
     let mut fewest = u8::MAX;
-    for (_, r, it) in out {
+    for (_, r, it, approx) in out {
         if r < fewest {
             fewest = r;
-            kept.push(it);
+            kept.push((it, approx));
         }
     }
     kept.truncate(usize::from(req.max_results));
     if kept.is_empty() {
         return Err(PlanError::NoRoute);
     }
+    let approximate = kept.iter().any(|k| k.1);
+    let kept: Vec<Itinerary> = kept.into_iter().map(|k| k.0).collect();
     let mut warnings = Vec::new();
+    if (meta.valid_to - date).num_days() <= EXPIRES_SOON_DAYS {
+        warnings.push(Warning::FeedExpiresSoon {
+            valid_to: meta.valid_to,
+        });
+    }
+    if approximate {
+        warnings.push(Warning::ApproximateFrequencyTrip);
+    }
     if streets.is_none() {
         warnings.push(Warning::NoStreetGraph);
     } else {
@@ -413,10 +468,6 @@ pub(crate) fn plan(
         itineraries: kept,
         warnings,
     })
-}
-
-fn time(date: NaiveDate, secs: u32) -> NaiveDateTime {
-    date.and_time(chrono::NaiveTime::MIN) + chrono::Duration::seconds(i64::from(secs))
 }
 
 struct Query<'a> {
@@ -554,19 +605,24 @@ impl Query<'_> {
         (m.round() as u32, Some(Polyline(vec![a, b])))
     }
 
-    /// Builds the itinerary of a RAPTOR journey with its access and egress walks.
+    /// Builds the itinerary of a RAPTOR journey with its access and egress
+    /// walks; true when it rides an approximate (headway-only) trip.
+    /// `shifts`: the day shifts of the search (to find a ride's stop times).
     #[allow(clippy::too_many_arguments)]
     fn itinerary(
         &self,
-        date: NaiveDate,
+        clock: &Clock,
+        shifts: &[u32],
         from: &End,
         to: &End,
         f: &Found,
         acc: &WalkTo,
         egr: &WalkTo,
         unlinked: &mut Vec<u32>,
-    ) -> Itinerary {
+    ) -> (Itinerary, bool) {
         let tt = self.pack.timetable();
+        let time = |secs: u32| clock.at(secs);
+        let mut approximate = false;
         let linked = |s: u32| {
             self.streets
                 .is_some_and(|st| st.stop_snap(s as usize).is_some())
@@ -608,12 +664,12 @@ impl Query<'_> {
             })
             .sum();
         let mut t = first_board.saturating_sub(pre).saturating_sub(acc.secs);
-        let departure = time(date, t);
+        let departure = time(t);
         let mut walk_m = acc.metres.round() as u32;
         if acc.metres > 0.0 || acc.secs > 0 {
             legs.push(Leg::Walk {
-                start: time(date, t),
-                end: time(date, t + acc.secs),
+                start: time(t),
+                end: time(t + acc.secs),
                 distance_m: acc.metres.round() as u32,
                 from_stop: None,
                 to_stop: Some(self.stop_ref(f.origin)),
@@ -632,8 +688,8 @@ impl Query<'_> {
                     let (m, geometry) = self.stop_walk(x.0, y.0);
                     walk_m += m;
                     legs.push(Leg::Walk {
-                        start: time(date, t),
-                        end: time(date, t + secs),
+                        start: time(t),
+                        end: time(t + secs),
                         distance_m: m,
                         from_stop: Some(self.stop_ref(x.0)),
                         to_stop: Some(self.stop_ref(y.0)),
@@ -651,16 +707,26 @@ impl Query<'_> {
                 } => {
                     rides += 1;
                     let i = trip.index();
+                    approximate |= tt.trip_approximate.get(i) == Some(&1);
                     let pts: Vec<LatLon> = {
                         let times = tt.trip_times(i);
-                        let a = times.iter().position(|s| s.0 == x.0 && s.2 == dep.0);
-                        let b = times.iter().rposition(|s| s.0 == y.0 && s.1 == arr.0);
-                        match (a, b) {
-                            (Some(a), Some(b)) if a <= b => times[a..=b]
+                        // The trip's own times are shifted by its day's shift.
+                        let at = |t: u32, sh: u32| t.checked_add(sh);
+                        let span = shifts.iter().find_map(|&sh| {
+                            let a = times
+                                .iter()
+                                .position(|s| s.0 == x.0 && at(s.2, sh) == Some(dep.0))?;
+                            let b = times
+                                .iter()
+                                .rposition(|s| s.0 == y.0 && at(s.1, sh) == Some(arr.0))?;
+                            (a <= b).then_some((a, b))
+                        });
+                        match span {
+                            Some((a, b)) => times[a..=b]
                                 .iter()
                                 .filter_map(|s| self.stop_pos(s.0 as usize))
                                 .collect(),
-                            _ => Vec::new(),
+                            None => Vec::new(),
                         }
                     };
                     legs.push(Leg::Transit {
@@ -674,8 +740,8 @@ impl Query<'_> {
                         headsign: tt.trip_headsigns.get(i).cloned().unwrap_or_default(),
                         from_stop: self.stop_ref(x.0),
                         to_stop: self.stop_ref(y.0),
-                        board: time(date, dep.0),
-                        alight: time(date, arr.0),
+                        board: time(dep.0),
+                        alight: time(arr.0),
                         geometry: (pts.len() >= 2).then_some(Polyline(pts)),
                     });
                     t = arr.0;
@@ -685,8 +751,8 @@ impl Query<'_> {
         let t = f.journey.arr.0.max(t);
         if egr.metres > 0.0 || egr.secs > 0 {
             legs.push(Leg::Walk {
-                start: time(date, t),
-                end: time(date, t + egr.secs),
+                start: time(t),
+                end: time(t + egr.secs),
                 distance_m: egr.metres.round() as u32,
                 from_stop: Some(self.stop_ref(f.target)),
                 to_stop: None,
@@ -694,12 +760,13 @@ impl Query<'_> {
             });
         }
         walk_m += egr.metres.round() as u32;
-        Itinerary {
+        let it = Itinerary {
             legs,
             departure,
-            arrival: time(date, t + egr.secs),
+            arrival: time(t + egr.secs),
             transfers: rides.saturating_sub(1),
             walk_m,
-        }
+        };
+        (it, approximate)
     }
 }

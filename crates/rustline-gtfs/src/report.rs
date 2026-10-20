@@ -34,7 +34,8 @@ pub enum IssueKind {
     UnknownRoute,
     /// A stop time points at a `stop_id` that is not in stops.txt.
     UnknownStop,
-    /// A frequencies.txt row with headway 0 or end ≤ start.
+    /// A frequencies.txt row with headway 0, end ≤ start, or shifted times
+    /// that do not fit in u32: the row is dropped, the feed is kept (M5).
     InvalidFrequency,
     /// A stop/station/entrance without valid coordinates.
     StopWithoutCoordinates,
@@ -46,20 +47,39 @@ pub enum IssueKind {
     ApproximateFrequencyTrips,
     /// A transfers.txt row for a (from, to) pair that already has one (skipped).
     DuplicateTransfer,
+    /// A transfers.txt row Rustline does not use: `transfer_type` 4/5 (in-seat),
+    /// an unknown or unreadable type, or trip/route columns (skipped).
+    UnsupportedTransfer,
+    /// A transfers.txt row naming a stop that is not in stops.txt (skipped).
+    UnknownTransferStop,
+    /// A type 2 transfers.txt row without `min_transfer_time`: the footpath
+    /// time is used instead.
+    MissingMinTransferTime,
+    /// calendar_dates.txt adds and removes a service on the same day: it does not run.
+    ConflictingCalendarDates,
+    /// A calendar.txt row with `start_date` after `end_date`: no weekday runs.
+    EmptyDateRange,
 }
 
 impl IssueKind {
-    /// Errors drop data; warnings don't.
+    /// Errors drop trips; warnings don't (an `InvalidFrequency` row is only
+    /// one frequencies.txt row, dropped with a warning: Leader, M5).
     pub fn severity(self) -> Severity {
         use IssueKind::*;
         match self {
             TooFewStopTimes | DecreasingTimes | MissingBoundaryTime | UnknownService
-            | UnknownRoute | UnknownStop | InvalidFrequency => Severity::Error,
-            StopWithoutCoordinates
+            | UnknownRoute | UnknownStop => Severity::Error,
+            InvalidFrequency
+            | StopWithoutCoordinates
             | InterpolatedTimes
             | OvertakingSplit
             | ApproximateFrequencyTrips
-            | DuplicateTransfer => Severity::Warning,
+            | DuplicateTransfer
+            | UnsupportedTransfer
+            | UnknownTransferStop
+            | MissingMinTransferTime
+            | ConflictingCalendarDates
+            | EmptyDateRange => Severity::Warning,
         }
     }
 
@@ -81,6 +101,17 @@ impl IssueKind {
             DuplicateTransfer => {
                 "duplicate transfers.txt rows (kept the longest min_transfer_time, then the higher transfer_type)"
             }
+            UnsupportedTransfer => {
+                "transfers.txt rows not used (type 4/5 or unknown, or trip/route-specific; skipped)"
+            }
+            UnknownTransferStop => "transfers.txt rows with an unknown stop_id (skipped)",
+            MissingMinTransferTime => {
+                "type 2 transfers.txt rows without min_transfer_time (footpath time used)"
+            }
+            ConflictingCalendarDates => {
+                "services added and removed on the same day in calendar_dates.txt (not running)"
+            }
+            EmptyDateRange => "calendar.txt rows with start_date after end_date (never run)",
         }
     }
 }

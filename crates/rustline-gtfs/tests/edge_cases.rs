@@ -452,8 +452,8 @@ fn missing_agency_timezone_does_not_default() {
 }
 
 #[test]
-#[ignore = "Known gap (M1) #4, see README: agency_timezone is not checked against IANA names (no chrono-tz until M5)"]
 fn invalid_timezone_is_rejected() {
+    // Was Known gap (M1) #4; fixed in M5 (chrono-tz).
     let agency =
         "agency_id,agency_name,agency_url,agency_timezone\nAG,A,https://a.invalid/,Mars/Olympus\n";
     let feed = TempFeed::new(&[

@@ -297,7 +297,13 @@ fn a_full_5x5_window_of_capped_cells_loads_and_snaps_exactly() {
     let req = rustline_core::PlanRequest {
         from: p,
         to: rustline_model::LatLon::new(p.lat + (1.0f64 / 6_371_008.8).to_degrees(), p.lon),
-        time: rustline_core::TimeSpec::DepartAt(meta.valid_from.and_hms_opt(8, 0, 0).unwrap()),
+        time: rustline_core::TimeSpec::DepartAt(
+            meta.valid_from
+                .and_hms_opt(8, 0, 0)
+                .unwrap()
+                .and_utc()
+                .fixed_offset(),
+        ),
         ..Default::default()
     };
     let t = Instant::now();

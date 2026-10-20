@@ -118,7 +118,9 @@ fn broken_feed_report() {
     ] {
         assert_eq!(report.count(kind), 1, "{kind:?}");
     }
-    assert_eq!(report.errors.len(), 6);
+    // 5 since M5: InvalidFrequency (the headway-0 row) is a warning now (Tester M5
+    // final check item 4; changed by Builder), so it is no longer in `errors`.
+    assert_eq!(report.errors.len(), 5);
 }
 
 #[test]

@@ -14,3 +14,9 @@ rustline-model = { path = "../rustline-model" }
 rustline-pack = { path = "../rustline-pack" }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
+# Own tolerant transfers.txt reader (M5): the same csv and zip versions and
+# features gtfs-structures already uses, so no new crates.
+csv = "1.4"
+zip = { version = "7.2", default-features = false, features = ["deflate"] }
+# IANA timezone names: agency_timezone is checked at build time (M1 gap #4).
+chrono-tz = "0.10"
