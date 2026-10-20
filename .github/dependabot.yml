@@ -1,5 +1,6 @@
 # Dependabot version updates.
 # Note: GitHub only reads this file from the default branch (main).
+# Each ecosystem gets one grouped PR per week.
 version: 2
 updates:
   # Cargo dependencies of the Rust workspace
@@ -13,8 +14,8 @@ updates:
       - dependency-name: gtfs-structures
         versions: [">=0.49"]
     groups:
-      cargo-minor-and-patch:
-        update-types: [minor, patch]
+      cargo:
+        patterns: ["*"]
 
   # Actions used in .github/workflows
   - package-ecosystem: github-actions
@@ -22,6 +23,9 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # The toolchain tag is our Rust 1.85 MSRV pin; never bump it.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
-      actions-minor-and-patch:
-        update-types: [minor, patch]
+      github-actions:
+        patterns: ["*"]
