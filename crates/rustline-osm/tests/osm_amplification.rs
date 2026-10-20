@@ -2,7 +2,8 @@
 //! ~31 MiB of 1-byte list items must not make the reader hold many times that.
 //! Lists (packed varints, string tables, way refs) are capped at
 //! `max_blob_bytes / 64` items per block. A counting allocator measures the
-//! peak heap of each parse. Run with `--test-threads 1` (the peak is per process).
+//! peak heap of each parse. The peak is per process, so every test holds `ONE`
+//! from its first line (input building included); default threads are fine.
 
 #[path = "m4_pbf/mod.rs"]
 mod m4_pbf;
@@ -16,8 +17,14 @@ use std::sync::Mutex;
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
-/// The peak is per process: one parse at a time.
+/// The peak is per process: one test at a time, input building included
+/// (parallel tests share the counting allocator).
 static ONE: Mutex<()> = Mutex::new(());
+
+/// Taken on the first line of every test in this file.
+fn one() -> std::sync::MutexGuard<'static, ()> {
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // SAFETY: forwards to the system allocator and only counts bytes.
 unsafe impl GlobalAlloc for Counting {
@@ -74,7 +81,6 @@ fn block(group: &[u8]) -> Vec<u8> {
 }
 
 fn parse(name: &str, bytes: &[u8]) -> (Result<usize, String>, usize) {
-    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let d = TempDir::new("amp");
     let p = d.file("case.osm.pbf", bytes);
     let base = LIVE.load(Relaxed);
@@ -93,6 +99,7 @@ fn parse(name: &str, bytes: &[u8]) -> (Result<usize, String>, usize) {
 
 #[test]
 fn way_with_31_million_refs() {
+    let _one = one();
     let mut way = Msg::default();
     way.uint(1, 1)
         .packed_uint(2, &[1])
@@ -107,6 +114,7 @@ fn way_with_31_million_refs() {
 
 #[test]
 fn dense_nodes_with_10_million_entries_per_list() {
+    let _one = one();
     let n = RAW / 3;
     let mut dense = Msg::default();
     dense
@@ -122,6 +130,7 @@ fn dense_nodes_with_10_million_entries_per_list() {
 
 #[test]
 fn string_table_with_15_million_entries() {
+    let _one = one();
     // Each entry is 2 bytes (field 1, length 0).
     let st: Vec<u8> = [0x0Au8, 0x00].repeat(RAW / 2 - 16);
     let mut pb = Msg::default();
@@ -133,6 +142,7 @@ fn string_table_with_15_million_entries() {
 
 #[test]
 fn normal_blocks_are_not_affected() {
+    let _one = one();
     // The cap must not reject an ordinary file.
     let mut o = Osm::new();
     o.street(
