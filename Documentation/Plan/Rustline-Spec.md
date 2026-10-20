@@ -301,11 +301,15 @@ pub enum Warning { FeedExpiresSoon { valid_to: NaiveDate }, ApproximateFrequency
 
 ### 11.3 Dart (via FRB, `rustline-ffi`)
 ```dart
-final engine = await RustlineEngine.open(path: packPath);
-final res = await engine.plan(req: PlanRequest(from: LatLon(45.64, 25.59), to: LatLon(45.66, 25.61),
-    departAt: DateTime.now(), maxResults: 5));
+await RustLib.init();
+final engine = await RustlineEngine.open(path: packPath);   // or openWithLimit(path:, maxBodyBytes:)
+final now = DateTime.now();
+final res = await engine.plan(req: FfiPlanRequest(fromLat: 45.64, fromLon: 25.59, toLat: 45.66, toLon: 25.61,
+    departAtMs: now.millisecondsSinceEpoch, departOffsetSecs: now.timeZoneOffset.inSeconds, maxResults: 5));
+final info = await engine.info();                            // FfiPackInfo, dates as days since 1970-01-01
+await installPack(srcZst: downloaded, dest: packPath);       // {dest}.lock, free-space check, own .tmp + fsync + rename
 ```
-Calls run on a Rust thread (FRB async), never blocking the UI. Errors arrive as Dart exceptions with the same variant names.
+(M6, `crates/rustline-ffi/src/api.rs`, plugin `rustline_flutter`.) Types are plain data (`FfiPlanRequest`, `FfiPlanResponse`, `FfiItinerary`, `FfiLeg` = `Walk | Transit`, `FfiStop`, `FfiPackInfo`); every time crosses as epoch milliseconds + offset seconds and the answer is in the feed's offset. Optional request fields: `maxAccessM`, `walkSpeedMps`, `maxTransfers`. Calls run on a Rust thread (FRB async), never blocking the UI. Every function returns `Result`; errors arrive as a typed Dart `RustlineException` with a stable `code`: `invalid_request`, `outside_coverage`, `no_route`, `date_outside_feed`, `pack_corrupt`, `pack_version`, `pack_missing`, `pack_io`, `pack_too_large`, `no_space`, `internal` (a panic, caught in Rust; the app keeps running). `RustlinePlanner` (Dart) is latest-wins: a superseded query resolves to null; a single Rust call is bounded (≤ 1 s, measured worst 2.7 ms on the PC for 200 random Brașov queries).
 
 ### 11.4 HTTP JSON (`rustline-server`, optional)
 `POST /v1/plan`
@@ -349,8 +353,18 @@ Measured in M5 (2026-10-18, PC: 11th Gen Intel Core i7-11700K @ 3.60GHz, 16 thre
 | Peak RSS, bench process (Brașov build + engine + 1 000 queries) | 51 MiB |
 | Peak RSS, `m5_properties` p95 test (Brașov + MBTA builds) | 753 MiB (mostly the MBTA feed build) |
 
+Measured in M6 (2026-10-20). Phone (A54) numbers are left for Savin.
+| Measurement | Value |
+|---|---|
+| `librustline_ffi.so`, release + LTO, stripped (llvm-strip from NDK 26.1) | arm64-v8a **2.77 MiB** (2 903 936 B); x86_64 **2.91 MiB** (3 048 288 B) |
+| Example APK (`flutter build apk --release --target-platform android-arm64,android-x64`) | 14.6 MB |
+| Host stand-in, not emulator: `rustline_perf_test.dart` on `flutter-tester` (Linux PC above, Dart debug VM, Rust release library), Brașov pack with streets, 100 fixed queries | p50 0.93 ms, p95 2.52 ms, max 5.96 ms; pack open median 31.7 ms |
+| **Emulator** (x86_64, android-34 google_apis, KVM, on the PC above): `flutter drive --profile` of `rustline_perf_test.dart`, Brașov pack with streets, 100 fixed queries (52 with a route) | p50 **0.79 ms**, p95 **2.65 ms**, max 5.41 ms; pack open median **49.1 ms** |
+| Emulator, same test in debug mode (Rust built in debug; not comparable) | p50 5.9 ms, p95 17.4 ms; pack open median 179 ms |
+| Samsung A54, profile: p50 / p95 / pack open / peak memory | for Savin |
 
-Release profile: `opt-level=3`, `lto="fat"`, `codegen-units=1`, `panic="abort"` (except in FFI where we catch panics), `strip=true`. Ship only `arm64-v8a` (+ `armeabi-v7a`, `x86_64` if needed) via Android App Bundle splits.
+
+Release profile: `opt-level=3`, `lto="fat"`, `codegen-units=1`, `strip=true`, and the default `panic="unwind"` for the whole workspace: Cargo cannot set `panic` per crate, and `rustline-ffi` needs unwinding to catch panics (a test checks that no profile sets `abort`). Ship only `arm64-v8a` (+ `x86_64` for the emulator); `armeabi-v7a` is not supported (M6).
 
 ## 13. Integration with RoTransit
 - **Frontend:** new `features/journey/` (planner screen, results list, map polyline using existing flutter_map). Rustline added as an FRB plugin package (`rustline_flutter`), kept in the Rustline repo, referenced by path/git from `frontend/pubspec.yaml`.

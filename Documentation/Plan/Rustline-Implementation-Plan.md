@@ -137,6 +137,7 @@ Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-
 - **Bound time as well as memory.** No loop, search or recursion whose length comes from crafted input without a cap (rounds, Dijkstra settled nodes, label bags, reconstruction length, retries). Each milestone states its time and memory budget and tests a hostile input against it.
 - **Validation must bound derived work, not just ranges:** any structure built from pack data (grids, indexes) must have a cap and a tamper test. *(Added after M4 review R28 MF1: in-range street coordinates spread over the globe made the snapping grid need 3.5 GB at load.)*
 - **No `as` casts on derived values:** any value computed from input (shifted times, offsets, counts, lengths) uses `checked_*`/`try_from`, and an overflow becomes a reported error or a skipped row, never a silent wrap. Every user-visible time prints its UTC offset. *(Added after M5 review MF1/MF2: frequency expansion wrapped late times with `as u32`; CLI legs printed times without offsets, so DST-day legs were ambiguous.)*
+- **Shared files need exclusive ownership:** any write that ends in a rename (installs, caches, packs) holds a lock for the whole operation and uses its own `create_new` temp file; leftovers are cleaned only under that lock; a two-writer test is required. Panic/error text that crosses a boundary is fixed text, never the panic payload or a file:line. *(Added after M6 review MF1/MF2.)*
 - **Measure peak RSS** (`/usr/bin/time -v`) on the largest feed (MBTA) *and* on the hostile inputs; record both in the report.
 - **Docs commands run verbatim** from `fixtures/feeds/`, with explicit output paths (no `out/*.rlp` globs that can match two files).
 - **Licence/attribution** recorded in `fixtures/manifest.tsv` for every feed and OSM extract; anything shown to users carries the attribution.
@@ -893,6 +894,16 @@ fn to_service_time(tz: Tz, t: DateTime<FixedOffset>) -> Vec<(NaiveDate, Seconds)
 
 **Goal:** RoTransit plans a journey offline on your Samsung A54 using Rustline, shown in a prototype planner screen.
 **Prerequisites:** M5, FRB hello-world from M0.
+
+> **Scope now (Savin, 2026-10-14 / 2026-10-20):** build and test the engine *ready for integration* only. Do steps 1–3, 7 and 8 inside the Rustline repo, using `rustline_flutter/example` as the test app (smoke integration test, 100-query measurement, error/no-panic tests, open-pack safety, concurrency/cancellation). **Do not** do steps 4–6 or touch RoTransit (no RoTransit branch, bundling, freshness banner, Riverpod screen, or in-app attribution). Acceptance items that need RoTransit are deferred. Items that need the physical A54 are measured on the emulator now, and the A54 numbers are left for Savin to run. M5 follow-ups to include: a D-1 case in the m4_plan brute force, a trip whose frequency rows are all invalid (error or documented), and an explicit memory assertion (< 384 MiB) in the at-caps test.
+
+### M6 decisions (Leader, 2026-10-20, from Tester's tests-first gaps)
+- Every public FFI fn returns `Result`, including `info()`.
+- Error codes: `invalid_request`, `outside_coverage`, `no_route`, `date_outside_feed`, `pack_corrupt`, `pack_version`, plus `pack_missing`, `pack_io`, `pack_too_large`, `no_space`, and `internal` (panics). Errors cross as a typed Dart `RustlineException` with a `code` field (an FRB-mapped error type, not parsed from text; `fromMessage` is allowed only as a fallback).
+- Cancellation: a latest-wins `RustlinePlanner` in the plugin; a superseded query resolves to null. Each Rust call stays bounded (≤ 1 s).
+- Pack install lives in `rustline-ffi`: `install_pack(src, dest)` (free-space check, temp file + atomic rename, partial-file recovery), with a debug-only free-space override for tests.
+- `FfiPlanRequest`: from/to lat/lon, `depart_at_ms`, `depart_offset_secs`, `max_results`, optional `max_access_m`, `walk_speed_mps`, `max_transfers`.
+- Tests are staged in `pending/rustline-ffi/tests/`; the crate folder and its Cargo.toml land together (workspace glob `crates/*`).
 **Spec:** [§11.3 Dart API](Rustline-Spec.md#113-dart-via-frb-rustline-ffi), [§13 integration](Rustline-Spec.md#13-integration-with-rotransit), [§12 phone targets](Rustline-Spec.md#12-performance-targets-and-budgets-all-est-to-be-validated-in-m5).
 
 ### Steps

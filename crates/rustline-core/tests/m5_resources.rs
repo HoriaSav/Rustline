@@ -179,6 +179,9 @@ fn frequency_expansion_at_the_caps_stays_under_512_mib() {
     );
     assert_eq!(trips, 200_000);
     assert_eq!(p.stop_count(), 25);
+    // M5 follow-up (M6 tests-first): explicit budget, well under the 512 MiB abort.
+    assert!(build < 384, "build peak {build} MiB >= 384 MiB");
+    assert!(pack < 384, "build + pack peak {pack} MiB >= 384 MiB");
 }
 
 #[test]

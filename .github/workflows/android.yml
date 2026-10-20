@@ -1,0 +1,42 @@
+name: Android
+
+# Cross-builds the FFI library for phones (plan M6 step 8): arm64-v8a only,
+# the ABI Rustline ships (x86_64 is for the emulator and built by Flutter).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: 26.1.10909125
+
+jobs:
+  ffi-arm64:
+    name: cargo ndk arm64-v8a
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The MSRV (workspace rust-version), so the phone build proves 1.85 too.
+      - uses: dtolnay/rust-toolchain@1.85
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install NDK
+        run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+      - name: Install cargo-ndk
+        run: cargo install --locked cargo-ndk --version 4.1.2
+      - name: Build
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          cargo ndk -t arm64-v8a build --locked --release -p rustline-ffi
+      - name: Size
+        run: ls -l target/aarch64-linux-android/release/librustline_ffi.so

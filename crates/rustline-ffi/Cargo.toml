@@ -1,0 +1,35 @@
+[package]
+name = "rustline-ffi"
+description = "Thin flutter_rust_bridge layer over rustline-core (plan M6, spec §11.3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# Same file stem on every platform: librustline_ffi.so (Android), loaded by the
+# rustline_flutter plugin. "lib" lets the tests link it.
+name = "rustline_ffi"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+rustline-core = { path = "../rustline-core" }
+rustline-model = { path = "../rustline-model" }
+rustline-pack = { path = "../rustline-pack" }
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# Must match the Dart package and the codegen exactly (plan M6 DoD). Builds on 1.85.
+flutter_rust_bridge = "=2.12.0"
+# Free space of the pack folder before installing (statvfs); already in Cargo.lock.
+libc = "0.2"
+# Decompressing a downloaded .rlp.zst in install_pack; same version as rustline-pack.
+zstd = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+# Tests only: an anyhow::Error wrapper in the test adapter, tiny packs from GTFS.
+anyhow = "1.0.104"
+rustline-gtfs = { path = "../rustline-gtfs" }
+
+[lints.rust]
+# FRB's generated code checks cfg(frb_expand).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
