@@ -267,7 +267,7 @@ impl Engine {
 
 pub struct PlanRequest {
     pub from: LatLon, pub to: LatLon,
-    pub time: TimeSpec,                 // DepartAt(DateTime) | ArriveBy(DateTime) (phase 4)
+    pub time: TimeSpec,                 // DepartAt(DateTime) | ArriveBy(DateTime) (M8)
     pub max_transfers: u8,              // default 3
     pub max_access_walk_m: u32,         // default 1000 (est.)
     pub max_transfer_walk_m: u32,       // default 500 (est.)
@@ -306,7 +306,7 @@ await RustLib.init();
 final engine = await RustlineEngine.open(path: packPath);   // or openWithLimit(path:, maxBodyBytes:)
 final now = DateTime.now();
 final res = await engine.plan(req: FfiPlanRequest(fromLat: 45.64, fromLon: 25.59, toLat: 45.66, toLon: 25.61,
-    departAtMs: now.millisecondsSinceEpoch, departOffsetSecs: now.timeZoneOffset.inSeconds, maxResults: 5));
+    timeKind: FfiTimeKind.departAt, timeMs: now.millisecondsSinceEpoch, timeOffsetSecs: now.timeZoneOffset.inSeconds, maxResults: 5));
 final info = await engine.info();                            // FfiPackInfo, dates as days since 1970-01-01
 await installPack(srcZst: downloaded, dest: packPath);       // {dest}.lock, streamed into own .tmp (free space checked), fsync, header, CRC and body checked from disk (layout, check() rules, IANA tz, street grid), rename
 ```

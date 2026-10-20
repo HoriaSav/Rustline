@@ -1,4 +1,5 @@
-// Rustline example app (plan M6): opens a pack and plans one Brașov journey.
+// Rustline example app (plan M6, M8): opens a pack and plans one Brașov journey,
+// leaving at 08:00 or (toggle) arriving by 08:00.
 // Run: flutter run --release --dart-define=RUSTLINE_PACK=<path on the device>
 import 'package:flutter/material.dart';
 import 'package:rustline_flutter/rustline_flutter.dart';
@@ -21,6 +22,7 @@ class _PlanPageState extends State<PlanPage> {
   String _text = packPath.isEmpty
       ? 'Pass --dart-define=RUSTLINE_PACK=<pack path on the device>'
       : 'Tap Plan';
+  bool _arriveBy = false;
 
   Future<void> _plan() async {
     try {
@@ -37,8 +39,9 @@ class _PlanPageState extends State<PlanPage> {
               fromLon: 25.5887,
               toLat: 45.6612,
               toLon: 25.6136,
-              departAtMs: t,
-              departOffsetSecs: 3 * 3600,
+              timeKind: _arriveBy ? FfiTimeKind.arriveBy : FfiTimeKind.departAt,
+              timeMs: t,
+              timeOffsetSecs: 3 * 3600,
               maxResults: 3));
       final lines = r.itineraries.map((it) {
         final dep =
@@ -63,7 +66,17 @@ class _PlanPageState extends State<PlanPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Rustline')),
-      body: Padding(padding: const EdgeInsets.all(16), child: Text(_text)),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SwitchListTile(
+            title: const Text('Arrive by 08:00'),
+            value: _arriveBy,
+            onChanged: (v) => setState(() => _arriveBy = v),
+          ),
+          Text(_text),
+        ]),
+      ),
       floatingActionButton: packPath.isEmpty
           ? null
           : FloatingActionButton(onPressed: _plan, child: const Text('Plan')),

@@ -498,8 +498,9 @@ impl SseDecode for crate::api::FfiPlanRequest {
         let mut var_fromLon = <f64>::sse_decode(deserializer);
         let mut var_toLat = <f64>::sse_decode(deserializer);
         let mut var_toLon = <f64>::sse_decode(deserializer);
-        let mut var_departAtMs = <i64>::sse_decode(deserializer);
-        let mut var_departOffsetSecs = <i32>::sse_decode(deserializer);
+        let mut var_timeKind = <crate::api::FfiTimeKind>::sse_decode(deserializer);
+        let mut var_timeMs = <i64>::sse_decode(deserializer);
+        let mut var_timeOffsetSecs = <i32>::sse_decode(deserializer);
         let mut var_maxResults = <u8>::sse_decode(deserializer);
         let mut var_maxAccessM = <Option<u32>>::sse_decode(deserializer);
         let mut var_walkSpeedMps = <Option<f64>>::sse_decode(deserializer);
@@ -509,8 +510,9 @@ impl SseDecode for crate::api::FfiPlanRequest {
             from_lon: var_fromLon,
             to_lat: var_toLat,
             to_lon: var_toLon,
-            depart_at_ms: var_departAtMs,
-            depart_offset_secs: var_departOffsetSecs,
+            time_kind: var_timeKind,
+            time_ms: var_timeMs,
+            time_offset_secs: var_timeOffsetSecs,
             max_results: var_maxResults,
             max_access_m: var_maxAccessM,
             walk_speed_mps: var_walkSpeedMps,
@@ -543,6 +545,18 @@ impl SseDecode for crate::api::FfiStop {
             name: var_name,
             lat: var_lat,
             lon: var_lon,
+        };
+    }
+}
+
+impl SseDecode for crate::api::FfiTimeKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::FfiTimeKind::DepartAt,
+            1 => crate::api::FfiTimeKind::ArriveBy,
+            _ => unreachable!("Invalid variant for FfiTimeKind: {}", inner),
         };
     }
 }
@@ -905,8 +919,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::FfiPlanRequest {
             self.from_lon.into_into_dart().into_dart(),
             self.to_lat.into_into_dart().into_dart(),
             self.to_lon.into_into_dart().into_dart(),
-            self.depart_at_ms.into_into_dart().into_dart(),
-            self.depart_offset_secs.into_into_dart().into_dart(),
+            self.time_kind.into_into_dart().into_dart(),
+            self.time_ms.into_into_dart().into_dart(),
+            self.time_offset_secs.into_into_dart().into_dart(),
             self.max_results.into_into_dart().into_dart(),
             self.max_access_m.into_into_dart().into_dart(),
             self.walk_speed_mps.into_into_dart().into_dart(),
@@ -954,6 +969,22 @@ impl flutter_rust_bridge::IntoDart for crate::api::FfiStop {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::FfiStop {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::FfiStop> for crate::api::FfiStop {
     fn into_into_dart(self) -> crate::api::FfiStop {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FfiTimeKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::DepartAt => 0.into_dart(),
+            Self::ArriveBy => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::FfiTimeKind {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FfiTimeKind> for crate::api::FfiTimeKind {
+    fn into_into_dart(self) -> crate::api::FfiTimeKind {
         self
     }
 }
@@ -1120,8 +1151,9 @@ impl SseEncode for crate::api::FfiPlanRequest {
         <f64>::sse_encode(self.from_lon, serializer);
         <f64>::sse_encode(self.to_lat, serializer);
         <f64>::sse_encode(self.to_lon, serializer);
-        <i64>::sse_encode(self.depart_at_ms, serializer);
-        <i32>::sse_encode(self.depart_offset_secs, serializer);
+        <crate::api::FfiTimeKind>::sse_encode(self.time_kind, serializer);
+        <i64>::sse_encode(self.time_ms, serializer);
+        <i32>::sse_encode(self.time_offset_secs, serializer);
         <u8>::sse_encode(self.max_results, serializer);
         <Option<u32>>::sse_encode(self.max_access_m, serializer);
         <Option<f64>>::sse_encode(self.walk_speed_mps, serializer);
@@ -1144,6 +1176,22 @@ impl SseEncode for crate::api::FfiStop {
         <String>::sse_encode(self.name, serializer);
         <Option<f64>>::sse_encode(self.lat, serializer);
         <Option<f64>>::sse_encode(self.lon, serializer);
+    }
+}
+
+impl SseEncode for crate::api::FfiTimeKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::FfiTimeKind::DepartAt => 0,
+                crate::api::FfiTimeKind::ArriveBy => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 

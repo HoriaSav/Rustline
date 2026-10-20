@@ -99,7 +99,7 @@ impl Hops {
         max_m: 500,
     };
 
-    fn secs(&self, secs: u32) -> u32 {
+    pub(crate) fn secs(&self, secs: u32) -> u32 {
         if self.scale == 1.0 {
             secs
         } else {

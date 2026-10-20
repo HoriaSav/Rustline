@@ -467,19 +467,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FfiPlanRequest dco_decode_ffi_plan_request(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return FfiPlanRequest(
       fromLat: dco_decode_f_64(arr[0]),
       fromLon: dco_decode_f_64(arr[1]),
       toLat: dco_decode_f_64(arr[2]),
       toLon: dco_decode_f_64(arr[3]),
-      departAtMs: dco_decode_i_64(arr[4]),
-      departOffsetSecs: dco_decode_i_32(arr[5]),
-      maxResults: dco_decode_u_8(arr[6]),
-      maxAccessM: dco_decode_opt_box_autoadd_u_32(arr[7]),
-      walkSpeedMps: dco_decode_opt_box_autoadd_f_64(arr[8]),
-      maxTransfers: dco_decode_opt_box_autoadd_u_8(arr[9]),
+      timeKind: dco_decode_ffi_time_kind(arr[4]),
+      timeMs: dco_decode_i_64(arr[5]),
+      timeOffsetSecs: dco_decode_i_32(arr[6]),
+      maxResults: dco_decode_u_8(arr[7]),
+      maxAccessM: dco_decode_opt_box_autoadd_u_32(arr[8]),
+      walkSpeedMps: dco_decode_opt_box_autoadd_f_64(arr[9]),
+      maxTransfers: dco_decode_opt_box_autoadd_u_8(arr[10]),
     );
   }
 
@@ -507,6 +508,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       lat: dco_decode_opt_box_autoadd_f_64(arr[2]),
       lon: dco_decode_opt_box_autoadd_f_64(arr[3]),
     );
+  }
+
+  @protected
+  FfiTimeKind dco_decode_ffi_time_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return FfiTimeKind.values[raw as int];
   }
 
   @protected
@@ -822,8 +829,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_fromLon = sse_decode_f_64(deserializer);
     var var_toLat = sse_decode_f_64(deserializer);
     var var_toLon = sse_decode_f_64(deserializer);
-    var var_departAtMs = sse_decode_i_64(deserializer);
-    var var_departOffsetSecs = sse_decode_i_32(deserializer);
+    var var_timeKind = sse_decode_ffi_time_kind(deserializer);
+    var var_timeMs = sse_decode_i_64(deserializer);
+    var var_timeOffsetSecs = sse_decode_i_32(deserializer);
     var var_maxResults = sse_decode_u_8(deserializer);
     var var_maxAccessM = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_walkSpeedMps = sse_decode_opt_box_autoadd_f_64(deserializer);
@@ -833,8 +841,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         fromLon: var_fromLon,
         toLat: var_toLat,
         toLon: var_toLon,
-        departAtMs: var_departAtMs,
-        departOffsetSecs: var_departOffsetSecs,
+        timeKind: var_timeKind,
+        timeMs: var_timeMs,
+        timeOffsetSecs: var_timeOffsetSecs,
         maxResults: var_maxResults,
         maxAccessM: var_maxAccessM,
         walkSpeedMps: var_walkSpeedMps,
@@ -858,6 +867,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_lat = sse_decode_opt_box_autoadd_f_64(deserializer);
     var var_lon = sse_decode_opt_box_autoadd_f_64(deserializer);
     return FfiStop(id: var_id, name: var_name, lat: var_lat, lon: var_lon);
+  }
+
+  @protected
+  FfiTimeKind sse_decode_ffi_time_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return FfiTimeKind.values[inner];
   }
 
   @protected
@@ -1192,8 +1208,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_64(self.fromLon, serializer);
     sse_encode_f_64(self.toLat, serializer);
     sse_encode_f_64(self.toLon, serializer);
-    sse_encode_i_64(self.departAtMs, serializer);
-    sse_encode_i_32(self.departOffsetSecs, serializer);
+    sse_encode_ffi_time_kind(self.timeKind, serializer);
+    sse_encode_i_64(self.timeMs, serializer);
+    sse_encode_i_32(self.timeOffsetSecs, serializer);
     sse_encode_u_8(self.maxResults, serializer);
     sse_encode_opt_box_autoadd_u_32(self.maxAccessM, serializer);
     sse_encode_opt_box_autoadd_f_64(self.walkSpeedMps, serializer);
@@ -1215,6 +1232,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.name, serializer);
     sse_encode_opt_box_autoadd_f_64(self.lat, serializer);
     sse_encode_opt_box_autoadd_f_64(self.lon, serializer);
+  }
+
+  @protected
+  void sse_encode_ffi_time_kind(FfiTimeKind self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected

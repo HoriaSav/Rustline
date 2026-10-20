@@ -69,16 +69,25 @@ fn fail(code: &str, message: impl Into<String>) -> RustlineException {
     }
 }
 
-/// A trip request. `depart_offset_secs` is the device's offset at that
-/// instant (only used to read the instant; the answer uses the feed's zone).
+/// When `time_ms` is: leave then, or arrive by then (M8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiTimeKind {
+    DepartAt,
+    ArriveBy,
+}
+
+/// A trip request. `time_ms` is the departure (`DepartAt`) or the deadline
+/// (`ArriveBy`); `time_offset_secs` is the device's offset at that instant
+/// (only used to read the instant; the answer uses the feed's zone).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FfiPlanRequest {
     pub from_lat: f64,
     pub from_lon: f64,
     pub to_lat: f64,
     pub to_lon: f64,
-    pub depart_at_ms: i64,
-    pub depart_offset_secs: i32,
+    pub time_kind: FfiTimeKind,
+    pub time_ms: i64,
+    pub time_offset_secs: i32,
     pub max_results: u8,
     pub max_access_m: Option<u32>,
     pub walk_speed_mps: Option<f64>,
@@ -178,15 +187,25 @@ impl RustlineEngine {
     }
 
     /// Opens a pack whose body may be at most `max_body_bytes` (a lower cap
-    /// for phones with little memory). A bigger file is refused before reading.
+    /// for phones with little memory). A file bigger than the limit is refused
+    /// as `pack_too_large` before reading (M8 decision 2). The whole file size
+    /// (header and trailer included) is compared, so a body exactly at the
+    /// limit is refused too. `install_pack`
+    /// checks against the 256 MiB default, so a pack it installed can still be
+    /// refused here with a smaller limit: pick the limit before downloading.
     pub fn open_with_limit(
         path: String,
         max_body_bytes: u64,
     ) -> Result<RustlineEngine, RustlineException> {
         guard(|| {
             let file = File::open(&path).map_err(io_error)?;
-            if file.metadata().map_err(io_error)?.is_dir() {
+            let meta = file.metadata().map_err(io_error)?;
+            if meta.is_dir() {
                 return Err(fail("pack_io", "the pack path is a directory"));
+            }
+            // The size first: a file over the caller's limit is too large, not corrupt.
+            if meta.len() > max_body_bytes {
+                return Err(fail("pack_too_large", "pack file is over the limit"));
             }
             // Read through the same handle, at most one byte over the limit, so a
             // file that grows after the check cannot get past it.
@@ -330,17 +349,20 @@ fn core_request(r: &FfiPlanRequest) -> Result<PlanRequest, RustlineException> {
             return Err(bad(name));
         }
     }
-    if r.depart_offset_secs.abs() > MAX_OFFSET_SECS {
-        return Err(bad("depart_offset_secs"));
+    if r.time_offset_secs.abs() > MAX_OFFSET_SECS {
+        return Err(bad("time_offset_secs"));
     }
-    let offset = FixedOffset::east_opt(r.depart_offset_secs).ok_or_else(|| bad("offset"))?;
-    let t = DateTime::from_timestamp_millis(r.depart_at_ms)
-        .ok_or_else(|| bad("depart_at_ms"))?
+    let offset = FixedOffset::east_opt(r.time_offset_secs).ok_or_else(|| bad("offset"))?;
+    let t = DateTime::from_timestamp_millis(r.time_ms)
+        .ok_or_else(|| bad("time_ms"))?
         .with_timezone(&offset);
     let mut req = PlanRequest {
         from: LatLon::new(r.from_lat, r.from_lon),
         to: LatLon::new(r.to_lat, r.to_lon),
-        time: TimeSpec::DepartAt(t),
+        time: match r.time_kind {
+            FfiTimeKind::DepartAt => TimeSpec::DepartAt(t),
+            FfiTimeKind::ArriveBy => TimeSpec::ArriveBy(t),
+        },
         max_results: r.max_results,
         ..PlanRequest::default()
     };

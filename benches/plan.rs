@@ -6,6 +6,7 @@
 //! Run: `cargo bench --locked -p rustline-core --bench plan`
 //!
 //! Before the criterion run it prints p50/p95 of one pass over the 1 000 queries.
+//! M8: the same queries once more as arrive-by (same instants as deadlines).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -85,24 +86,45 @@ fn bench(c: &mut Criterion) {
     let p = pack_of(&path);
     let e = Engine::new(p.clone()).expect("engine");
     let qs = queries(&e, &p);
-    let mut one: Vec<Duration> = qs
+    let arrive: Vec<PlanRequest> = qs
         .iter()
         .map(|q| {
-            let t0 = Instant::now();
-            let _ = e.plan(q);
-            t0.elapsed()
+            let TimeSpec::DepartAt(t) = q.time else {
+                return q.clone();
+            };
+            PlanRequest {
+                time: TimeSpec::ArriveBy(t),
+                ..q.clone()
+            }
         })
         .collect();
-    one.sort_unstable();
-    let at = |pct: usize| one[(one.len() * pct).div_ceil(100) - 1];
-    println!(
-        "plan: {QUERIES} queries, p50 {:?}, p95 {:?}",
-        at(50),
-        at(95)
-    );
+    for (name, qs) in [("plan", &qs), ("plan_arrive_by", &arrive)] {
+        let mut one: Vec<Duration> = qs
+            .iter()
+            .map(|q| {
+                let t0 = Instant::now();
+                let _ = e.plan(q);
+                t0.elapsed()
+            })
+            .collect();
+        one.sort_unstable();
+        let at = |pct: usize| one[(one.len() * pct).div_ceil(100) - 1];
+        println!(
+            "{name}: {QUERIES} queries, p50 {:?}, p95 {:?}",
+            at(50),
+            at(95)
+        );
+    }
     c.bench_function("plan_1000_queries", |b| {
         b.iter(|| {
             for q in &qs {
+                let _ = std::hint::black_box(e.plan(std::hint::black_box(q)));
+            }
+        })
+    });
+    c.bench_function("plan_arrive_by_1000_queries", |b| {
+        b.iter(|| {
+            for q in &arrive {
                 let _ = std::hint::black_box(e.plan(std::hint::black_box(q)));
             }
         })

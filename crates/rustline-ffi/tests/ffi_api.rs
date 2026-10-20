@@ -56,7 +56,7 @@ fn device_offset_other_than_the_feed_gives_the_same_answer() {
     let base = tiny_req();
     for off_h in [2, 13, -11, 0] {
         let mut r = tiny_req();
-        r.depart_offset_secs = off_h * 3600;
+        r.time_offset_secs = off_h * 3600;
         assert_eq!(
             summary(&plan(&e, r).unwrap()),
             summary(&plan(&e, base.clone()).unwrap()),
@@ -70,10 +70,10 @@ fn clock_off_by_a_day_still_plans_or_says_date_outside_feed() {
     let d = scratch("clock");
     let e = open(&tiny_pack_file(&d)).unwrap();
     let mut r = tiny_req();
-    r.depart_at_ms += 86_400_000; // Thursday: still in the feed.
+    r.time_ms += 86_400_000; // Thursday: still in the feed.
     assert!(plan(&e, r).is_ok());
     let mut r = tiny_req();
-    r.depart_at_ms -= 3 * 365 * 86_400_000; // 2027: before the feed.
+    r.time_ms -= 3 * 365 * 86_400_000; // 2027: before the feed.
     assert_eq!(err_code(plan(&e, r)), "date_outside_feed");
 }
 
@@ -97,12 +97,9 @@ fn nan_infinite_and_out_of_range_input_is_invalid_request() {
         ),
         ("walk speed 0", Box::new(|r| r.walk_speed_mps = Some(0.0))),
         ("walk speed -1", Box::new(|r| r.walk_speed_mps = Some(-1.0))),
-        (
-            "offset 20 h",
-            Box::new(|r| r.depart_offset_secs = 20 * 3600),
-        ),
-        ("ms i64::MAX", Box::new(|r| r.depart_at_ms = i64::MAX)),
-        ("ms i64::MIN", Box::new(|r| r.depart_at_ms = i64::MIN)),
+        ("offset 20 h", Box::new(|r| r.time_offset_secs = 20 * 3600)),
+        ("ms i64::MAX", Box::new(|r| r.time_ms = i64::MAX)),
+        ("ms i64::MIN", Box::new(|r| r.time_ms = i64::MIN)),
     ];
     for (name, f) in bad {
         let mut r = tiny_req();

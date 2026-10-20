@@ -721,6 +721,12 @@ pub(crate) struct Grid {
 
 impl Grid {
     /// The grid over `[lo_lat, hi_lat, lo_lon, hi_lon]` (degrees).
+    ///
+    /// Columns are sized at the highest latitude of the box (`k` below), so a
+    /// cell is at least `CELL_M` wide everywhere in it. The snapping budget
+    /// relies on that choice: a `LINK_MAX_M` circle then touches at most 3 × 3
+    /// cells. Sizing at a lower latitude would make cells narrower near the
+    /// pole edge and the scan could miss edges.
     pub(crate) fn for_box([lo_lat, hi_lat, lo_lon, hi_lon]: [f64; 4]) -> Grid {
         let k = ((lo_lat.abs().max(hi_lat.abs())).min(89.0))
             .to_radians()

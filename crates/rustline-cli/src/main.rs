@@ -5,8 +5,8 @@
 //! rustline bbox --gtfs <feed.zip|dir> [--margin-km <km>]
 //! rustline build-pack --gtfs <feed.zip|dir> --out <dir> [--osm <extract.osm.pbf> [--bbox <min_lon,min_lat,max_lon,max_lat>]]
 //!                     [--feed-id <id>] [--built-at <unix>]
-//! rustline plan --pack <pack> --from <lat,lon> --to <lat,lon> --at <YYYY-MM-DDTHH:MM[:SS][±HH:MM|Z]> [--geojson <file>]
-//! rustline plan --pack <pack> --from-stop <stop_id> --to-stop <stop_id> --at <YYYY-MM-DDTHH:MM[:SS]>
+//! rustline plan --pack <pack> --from <lat,lon> --to <lat,lon> (--at | --arrive-by) <YYYY-MM-DDTHH:MM[:SS][±HH:MM|Z]> [--geojson <file>]
+//! rustline plan --pack <pack> --from-stop <stop_id> --to-stop <stop_id> (--at | --arrive-by) <YYYY-MM-DDTHH:MM[:SS]>
 //! ```
 
 use std::fs;
@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use rustline_gtfs::{FeedCounts, ValidationReport};
 use serde::Serialize;
 
@@ -73,7 +73,8 @@ enum Command {
         built_at: Option<i64>,
     },
     /// Plan door to door (`--from`/`--to`) or between two stops
-    /// (`--from-stop`/`--to-stop`).
+    /// (`--from-stop`/`--to-stop`). Exactly one of `--at` / `--arrive-by`.
+    #[command(group(ArgGroup::new("time").required(true).args(["at", "arrive_by"])))]
     Plan {
         /// A .rlp or .rlp.zst pack.
         #[arg(long)]
@@ -110,8 +111,13 @@ enum Command {
         /// ambiguous local time takes the earlier instant, one in a DST gap
         /// moves forward past it. Stop to stop: service day and time.
         #[arg(long)]
-        at: String,
-        /// Most transfers to use (capped at 8; door to door defaults to 3).
+        at: Option<String>,
+        /// Arrive by this time instead (same formats as --at), leaving as
+        /// late as possible.
+        #[arg(long)]
+        arrive_by: Option<String>,
+        /// Most transfers to use (capped at 8; stop to stop defaults to 8,
+        /// door to door to 3).
         #[arg(long)]
         max_transfers: Option<u8>,
     },
@@ -182,14 +188,33 @@ fn run(cli: Cli) -> Result<()> {
             to_stop,
             geojson,
             at,
+            arrive_by,
             max_transfers,
-        } => match (from_stop, to_stop, from, to) {
-            (Some(a), Some(b), _, _) => plan(&pack, &a, &b, &at, max_transfers.unwrap_or(8))?,
-            (_, _, Some(a), Some(b)) => {
-                door_to_door(&pack, &a, &b, &at, max_transfers, geojson.as_deref())?
+        } => {
+            // clap makes exactly one of the two present.
+            let (when, arrive) = match (at, arrive_by) {
+                (_, Some(t)) => (t, true),
+                (Some(t), None) => (t, false),
+                (None, None) => anyhow::bail!("give one of --at or --arrive-by"),
+            };
+            match (from_stop, to_stop, from, to) {
+                (Some(a), Some(b), _, _) if arrive => {
+                    stops_arrive_by(&pack, &a, &b, &when, max_transfers)?
+                }
+                (Some(a), Some(b), _, _) => plan(&pack, &a, &b, &when, max_transfers.unwrap_or(8))?,
+                (_, _, Some(a), Some(b)) => door_to_door(
+                    &pack,
+                    &a,
+                    &b,
+                    &when,
+                    arrive,
+                    false,
+                    max_transfers,
+                    geojson.as_deref(),
+                )?,
+                _ => anyhow::bail!("give --from and --to, or --from-stop and --to-stop"),
             }
-            _ => anyhow::bail!("give --from and --to, or --from-stop and --to-stop"),
-        },
+        }
     }
     Ok(())
 }
@@ -442,12 +467,52 @@ fn bbox(gtfs: &Path, margin_km: &str) -> Result<()> {
     Ok(())
 }
 
-/// `plan --from --to`: door-to-door itineraries.
+/// `plan --from-stop --to-stop --arrive-by`: door to door between the two
+/// stops' own points with a 1 m access walk, up to 8 transfers by default
+/// (as `--at`). The time is read as for `--from/--to`.
+fn stops_arrive_by(
+    path: &Path,
+    from: &str,
+    to: &str,
+    at: &str,
+    max_transfers: Option<u8>,
+) -> Result<()> {
+    let engine =
+        rustline_core::Engine::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let tt = engine.pack().timetable();
+    let point = |id: &str| {
+        let s = tt
+            .stop_ids
+            .iter()
+            .position(|s| s == id)
+            .with_context(|| format!("unknown stop id {id:?}"))?;
+        let (lat, lon) = tt
+            .stop_pos(s)
+            .with_context(|| format!("stop {id:?} has no coordinates"))?;
+        Ok::<String, anyhow::Error>(format!("{lat},{lon}"))
+    };
+    let (a, b) = (point(from)?, point(to)?);
+    door_to_door(
+        path,
+        &a,
+        &b,
+        at,
+        true,
+        true,
+        Some(max_transfers.unwrap_or(8)),
+        None,
+    )
+}
+
+/// `plan --from --to`: door-to-door itineraries (`arrive`: arrive by `at`).
+#[allow(clippy::too_many_arguments)]
 fn door_to_door(
     path: &Path,
     from: &str,
     to: &str,
     at: &str,
+    arrive: bool,
+    stop_to_stop: bool,
     max_transfers: Option<u8>,
     geojson: Option<&Path>,
 ) -> Result<()> {
@@ -483,9 +548,16 @@ fn door_to_door(
     let mut req = rustline_core::PlanRequest {
         from: a,
         to: b,
-        time: rustline_core::TimeSpec::DepartAt(at),
+        time: if arrive {
+            rustline_core::TimeSpec::ArriveBy(at)
+        } else {
+            rustline_core::TimeSpec::DepartAt(at)
+        },
         ..Default::default()
     };
+    if stop_to_stop {
+        req.max_access_m = 1;
+    }
     if let Some(m) = max_transfers {
         req.max_transfers = m;
     }
@@ -500,6 +572,9 @@ fn door_to_door(
     );
     for w in &r.warnings {
         println!("warning: {w:?}");
+    }
+    if r.itineraries.is_empty() {
+        println!("no journey found");
     }
     // Local time in the feed's zone with its offset, so the two 03:30 of a
     // DST fall-back night can be told apart.

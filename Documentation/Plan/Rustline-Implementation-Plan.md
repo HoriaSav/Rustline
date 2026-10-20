@@ -837,7 +837,7 @@ cargo bench --locked -p rustline-core
 
 **Interfaces**
 ```rust
-pub enum TimeSpec { DepartAt(DateTime<FixedOffset>) }       // ArriveBy comes in M8 (arrive-by milestone)
+pub enum TimeSpec { DepartAt(DateTime<FixedOffset>), ArriveBy(DateTime<FixedOffset>) } // ArriveBy: M8
 pub enum Warning { FeedExpiresSoon { valid_to: NaiveDate }, ApproximateFrequencyTrip, StopNotLinkedToStreets(StopIdx) }
 fn to_service_time(tz: Tz, t: DateTime<FixedOffset>) -> Vec<(NaiveDate, Seconds)>;  // D-1, D (and D+1)
 ```
@@ -912,7 +912,7 @@ fn to_service_time(tz: Tz, t: DateTime<FixedOffset>) -> Vec<(NaiveDate, Seconds)
 - Error codes: `invalid_request`, `outside_coverage`, `no_route`, `date_outside_feed`, `pack_corrupt`, `pack_version`, plus `pack_missing`, `pack_io`, `pack_too_large`, `no_space`, and `internal` (panics). Errors cross as a typed Dart `RustlineException` with a `code` field (an FRB-mapped error type, not parsed from text; `fromMessage` is allowed only as a fallback).
 - Cancellation: a latest-wins `RustlinePlanner` in the plugin; a superseded query resolves to null. Each Rust call stays bounded (≤ 1 s).
 - Pack install lives in `rustline-ffi`: `install_pack(src, dest)` (free-space check, temp file + atomic rename, partial-file recovery), with a debug-only free-space override for tests.
-- `FfiPlanRequest`: from/to lat/lon, `depart_at_ms`, `depart_offset_secs`, `max_results`, optional `max_access_m`, `walk_speed_mps`, `max_transfers`.
+- `FfiPlanRequest`: from/to lat/lon, `time_kind` (M8), `time_ms` (M8: was `depart_at_ms`), `time_offset_secs` (M8: was `depart_offset_secs`), `max_results`, optional `max_access_m`, `walk_speed_mps`, `max_transfers`.
 - Tests are staged in `pending/rustline-ffi/tests/`; the crate folder and its Cargo.toml land together (workspace glob `crates/*`).
 **Spec:** [§11.3 Dart API](Rustline-Spec.md#113-dart-via-frb-rustline-ffi), [§13 integration](Rustline-Spec.md#13-integration-with-rotransit), [§12 phone targets](Rustline-Spec.md#12-performance-targets-and-budgets-all-est-to-be-validated-in-m5).
 
@@ -1140,9 +1140,18 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 - Mixing up departure/arrival service-day shifts around DST.
 
 ### Carried from M7 review
-- [ ] Test that the in-memory and on-disk grid checks (`build_grid` / `check_disk_grid`) agree: the globe case and one just under the cell cap.
-- [ ] Comment at `Grid::for_box` that the snapping budget depends on its highest-latitude choice.
-- [ ] `open_with_limit` with a smaller limit can fail on a pack installed under the 256 MiB default: document it, or pass the limit to `install_pack`.
+- [x] Test that the in-memory and on-disk grid checks (`build_grid` / `check_disk_grid`) agree: the globe case and one just under the cell cap.
+- [x] Comment at `Grid::for_box` that the snapping budget depends on its highest-latitude choice.
+- [x] `open_with_limit` with a smaller limit can fail on a pack installed under the 256 MiB default: document it, or pass the limit to `install_pack`.
+
+### M8 decisions (Leader, 2026-10-20)
+1. FFI: `time_kind: FfiTimeKind { DepartAt, ArriveBy }`, and `depart_at_ms` is renamed `time_ms` (the departure or the deadline). Dart, the example (arrive-by toggle) and the docs follow.
+2. `open_with_limit` with a limit below the file size returns `pack_too_large`; the size is checked before the body check. Documented at `open_with_limit`: `install_pack` checks the 256 MiB default.
+3. Walking-only and origin == destination behave exactly like depart-at, mirrored. Walk-only is offered under the same competitiveness rule, leaving at the latest time that still meets the deadline.
+4. `max_transfers` 255 is handled as in depart-at (capped at 8).
+5. Tester's measured perf test stays; the criterion bench (`benches/plan.rs`) gets the same 1 000 queries as arrive-by.
+6. CLI: `--at` is optional and exclusive with `--arrive-by`; exactly one is required (clap: "cannot be used with").
+7. Journeys that need more than a day of waiting are out of scope, matching the D − 1 / D / D + 1 window, so a journey must fit the D − 1 service-day window (no D − 2 trips; even a 23.8 h wait on a D − 2 trip is out), and the depart-late property is limited to that window.
 
 **Time (est.):** 6–9 evenings.
 
@@ -1200,6 +1209,14 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 4. Optional emulator job: integration test on an x86_64 emulator (reactivecircus/android-emulator-runner), allowed to be a separate workflow if slow.
 5. Caching (`Swatinem/rust-cache`, Gradle, pub), `concurrency` to cancel superseded runs, `permissions: contents: read`, actions pinned to a commit sha, Dependabot for actions.
 6. Real-feed tests: CI has no feeds (gitignored); either they stay `#[ignore]` in CI, or a job runs `scripts/fetch-fixtures.sh` with the manifest sha256 check and caches the result. Decide and document.
+7. **Open Dependabot PRs (#2–#7)** (opened 2026-10-20 after the first push; #1, the rust-toolchain 1.85 → 1.120 bump, was closed because 1.85 is the MSRV pin, and `dependabot.yml` now groups updates and ignores `dtolnay/rust-toolchain`). Goal: make CI pass, then merge the ones that pass. In each, only the "fmt, clippy, test" job fails; "cargo ndk arm64-v8a" passes.
+   - #2 actions/checkout 4 → 7: `rustline-osm` test `osm_amplification::dense_nodes_with_10_million_entries_per_list` fails with heap peak 79 MiB over `HEAP_LIMIT`. The PR changes no Rust code and `main` CI passed at 7e9b40c, so this test is flaky or depends on the runner; fix the test or limit first.
+   - #3 cargo minor/patch group (3 updates): the same `osm_amplification` heap-peak failure (79 MiB).
+   - #4 zstd 0.13.3 → 0.14.3: the same `osm_amplification` heap-peak failure (79 MiB).
+   - #5 zip 7.2.0 → 7.3.0: the same `osm_amplification` heap-peak failure (79 MiB).
+   - #6 sha2 0.10.9 → 0.11.0: compile error in `rustline-cli`, E0277 `sha2::Sha256: std::io::Write` not satisfied (0.11 API change). Needs a code change, e.g. hash through `Digest::update` instead of `io::copy`.
+   - #7 criterion 0.5.1 → 0.7.0: the same `osm_amplification` heap-peak failure (79 MiB); the benches compile, but check for API changes before merging.
+   - After the fixes, the grouped weekly PRs should replace these, so close any that are superseded.
 
 ### Done when
 - [ ] CI green on a PR for all jobs; a deliberately failing test/fmt/clippy turns it red

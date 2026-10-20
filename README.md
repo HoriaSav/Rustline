@@ -156,6 +156,7 @@ The output is shown under [Preview](#preview). Other commands:
 - `inspect <pack>.rlp` — prints `PackInfo` (counts, sha, validity, timezone, format version).
 - `bbox` prints `min_lon,min_lat,max_lon,max_lat` (the order `osmium extract -b` takes).
 - Without `--osm` every walk is a straight line × 1.3 and `PackInfo::street_graph` is false.
+- `--arrive-by <time>` instead of `--at` (exactly one of the two): arrive by then, leaving as late as possible.
 - `--at`: an ambiguous local time (DST fall-back) takes the earlier instant; a time in the DST gap moves forward.
 
 ### Rust API (`rustline-core`)
@@ -187,7 +188,7 @@ for it in &resp.itineraries {
 
 API rules:
 
-- `PlanRequest { from, to, time: TimeSpec::DepartAt(..), walk_speed_mps, max_access_m, max_transfer_m, max_transfers, max_results }`.
+- `PlanRequest { from, to, time: TimeSpec::DepartAt(..) | TimeSpec::ArriveBy(..), walk_speed_mps, max_access_m, max_transfer_m, max_transfers, max_results }`.
 - Limits (else `PlanError::InvalidRequest`): valid lat/lon; speed in (0, 3] m/s; `max_access_m` ≤ 3 000; `max_transfer_m` ≤ 500; `max_results` 1–255; `max_transfers` capped at 8.
 - A point more than 300 m from every street → `OutsideCoverage`; a date outside the feed → `DateOutsideFeed`; nothing usable → `NoRoute`.
 - `PlanResponse { itineraries, warnings }`; `Itinerary { legs, departure, arrival, transfers, walk_m }` with times as `DateTime<FixedOffset>` in the feed's zone. Warnings include `StopNotLinkedToStreets`, `NoStreetGraph`, `FeedExpiresSoon` (≤ 14 days) and `ApproximateFrequencyTrip`.
@@ -208,8 +209,9 @@ final now = DateTime.now();
 final resp = await planner.plan(FfiPlanRequest(
   fromLat: 45.6427, fromLon: 25.5887,
   toLat: 45.6579, toLon: 25.6012,
-  departAtMs: now.millisecondsSinceEpoch,
-  departOffsetSecs: now.timeZoneOffset.inSeconds,
+  timeKind: FfiTimeKind.departAt, // or FfiTimeKind.arriveBy: timeMs is then the deadline
+  timeMs: now.millisecondsSinceEpoch,
+  timeOffsetSecs: now.timeZoneOffset.inSeconds,
   maxResults: 5,
 ));
 if (resp == null) return; // superseded by a newer search
@@ -335,7 +337,7 @@ GitHub Actions: `ci.yml` (fmt, clippy, test), `android.yml` (`cargo ndk` arm64-v
 
 **M4**
 
-14. **Departure only** – `TimeSpec` has only `DepartAt` (arrive-by is M8).
+14. **Arrive-by** – looks back over the same service days D − 1, D and D + 1 of the deadline's date (M8).
 15. **Tag list** – `cycleway` (and unlisted values) is walkable only with an explicit `foot` tag.
 16. **OSM order** – nodes must come before ways, else `OsmError::Unsupported`; relations are ignored.
 17. **Bbox edge** – a way leaving the bbox is cut at its last node inside.

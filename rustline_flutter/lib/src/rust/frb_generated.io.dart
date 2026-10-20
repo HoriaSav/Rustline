@@ -83,6 +83,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FfiStop dco_decode_ffi_stop(dynamic raw);
 
   @protected
+  FfiTimeKind dco_decode_ffi_time_kind(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -196,6 +199,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FfiStop sse_decode_ffi_stop(SseDeserializer deserializer);
+
+  @protected
+  FfiTimeKind sse_decode_ffi_time_kind(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -314,6 +320,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_ffi_stop(FfiStop self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ffi_time_kind(FfiTimeKind self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);

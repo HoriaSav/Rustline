@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `copy_and_check`, `core_request`, `count`, `days`, `fail`, `free_space`, `guard`, `header_info`, `injected_flock_error`, `install`, `io_error`, `is_own_tmp`, `itinerary`, `line`, `lock`, `ms`, `pack_error`, `pack_info`, `plan_error`, `quiet_panics`, `stop`, `warning`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseExplicitAttribute): `debug_flock_fail`, `install_pack_with_free_space`
 
 /// Installs a downloaded `.rlp.zst` at `dest`. Holds an exclusive lock on
@@ -49,7 +49,12 @@ abstract class RustlineEngine implements RustOpaqueInterface {
       RustLib.instance.api.crateApiRustlineEngineOpen(path: path);
 
   /// Opens a pack whose body may be at most `max_body_bytes` (a lower cap
-  /// for phones with little memory). A bigger file is refused before reading.
+  /// for phones with little memory). A file bigger than the limit is refused
+  /// as `pack_too_large` before reading (M8 decision 2). The whole file size
+  /// (header and trailer included) is compared, so a body exactly at the
+  /// limit is refused too. `install_pack`
+  /// checks against the 256 MiB default, so a pack it installed can still be
+  /// refused here with a smaller limit: pick the limit before downloading.
   static Future<RustlineEngine> openWithLimit(
           {required String path, required BigInt maxBodyBytes}) =>
       RustLib.instance.api.crateApiRustlineEngineOpenWithLimit(
@@ -224,15 +229,17 @@ class FfiPackInfo {
           footpaths == other.footpaths;
 }
 
-/// A trip request. `depart_offset_secs` is the device's offset at that
-/// instant (only used to read the instant; the answer uses the feed's zone).
+/// A trip request. `time_ms` is the departure (`DepartAt`) or the deadline
+/// (`ArriveBy`); `time_offset_secs` is the device's offset at that instant
+/// (only used to read the instant; the answer uses the feed's zone).
 class FfiPlanRequest {
   final double fromLat;
   final double fromLon;
   final double toLat;
   final double toLon;
-  final PlatformInt64 departAtMs;
-  final int departOffsetSecs;
+  final FfiTimeKind timeKind;
+  final PlatformInt64 timeMs;
+  final int timeOffsetSecs;
   final int maxResults;
   final int? maxAccessM;
   final double? walkSpeedMps;
@@ -243,8 +250,9 @@ class FfiPlanRequest {
     required this.fromLon,
     required this.toLat,
     required this.toLon,
-    required this.departAtMs,
-    required this.departOffsetSecs,
+    required this.timeKind,
+    required this.timeMs,
+    required this.timeOffsetSecs,
     required this.maxResults,
     this.maxAccessM,
     this.walkSpeedMps,
@@ -257,8 +265,9 @@ class FfiPlanRequest {
       fromLon.hashCode ^
       toLat.hashCode ^
       toLon.hashCode ^
-      departAtMs.hashCode ^
-      departOffsetSecs.hashCode ^
+      timeKind.hashCode ^
+      timeMs.hashCode ^
+      timeOffsetSecs.hashCode ^
       maxResults.hashCode ^
       maxAccessM.hashCode ^
       walkSpeedMps.hashCode ^
@@ -273,8 +282,9 @@ class FfiPlanRequest {
           fromLon == other.fromLon &&
           toLat == other.toLat &&
           toLon == other.toLon &&
-          departAtMs == other.departAtMs &&
-          departOffsetSecs == other.departOffsetSecs &&
+          timeKind == other.timeKind &&
+          timeMs == other.timeMs &&
+          timeOffsetSecs == other.timeOffsetSecs &&
           maxResults == other.maxResults &&
           maxAccessM == other.maxAccessM &&
           walkSpeedMps == other.walkSpeedMps &&
@@ -330,6 +340,13 @@ class FfiStop {
           name == other.name &&
           lat == other.lat &&
           lon == other.lon;
+}
+
+/// When `time_ms` is: leave then, or arrive by then (M8).
+enum FfiTimeKind {
+  departAt,
+  arriveBy,
+  ;
 }
 
 /// An error with a stable code; thrown as `RustlineException` in Dart.

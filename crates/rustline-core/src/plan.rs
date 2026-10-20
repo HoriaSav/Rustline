@@ -22,6 +22,7 @@ use chrono::{DateTime, Days, FixedOffset, NaiveDate};
 use rustline_model::LatLon;
 use rustline_pack::Pack;
 
+use crate::back::{latest_departures, Incoming};
 use crate::raptor::{raptor_multi, Found, Hops};
 use crate::street::{haversine_m, Snap, Streets, SEARCH_CAP_M};
 use crate::time::{day_ref, Clock};
@@ -54,6 +55,9 @@ pub enum TimeSpec {
     /// the feed's timezone. (A local wall time without an offset: see
     /// [`crate::local_instant`].)
     DepartAt(DateTime<FixedOffset>),
+    /// Arrive at this instant or earlier, leaving as late as possible (M8).
+    /// Same offset rules; the service date is the deadline's local date.
+    ArriveBy(DateTime<FixedOffset>),
 }
 
 /// A door-to-door query. Limits are checked by [`crate::Engine::plan`];
@@ -273,18 +277,23 @@ struct End {
 pub(crate) fn plan(
     pack: &Pack,
     streets: Option<&Streets>,
+    incoming: &Incoming,
     tz: chrono_tz::Tz,
     req: &PlanRequest,
 ) -> Result<PlanResponse, PlanError> {
     req.check().map_err(PlanError::InvalidRequest)?;
-    let TimeSpec::DepartAt(at) = req.time;
+    let (at, arrive_by) = match req.time {
+        TimeSpec::DepartAt(t) => (t, false),
+        TimeSpec::ArriveBy(t) => (t, true),
+    };
     let date = at.with_timezone(&tz).date_naive();
     let meta = pack.meta();
     if date < meta.valid_from || date > meta.valid_to {
         return Err(PlanError::DateOutsideFeed);
     }
     // The search frame starts at D − 1's reference; D − 1, D and D + 1 (those
-    // inside the feed) are shifted into it by their real distance.
+    // inside the feed) are shifted into it by their real distance. Arrive-by
+    // uses the same three service days of the deadline's date.
     let prev = date
         .checked_sub_days(Days::new(1))
         .ok_or(PlanError::DateOutsideFeed)?;
@@ -303,7 +312,8 @@ pub(crate) fn plan(
     }
     let clock = Clock { origin, tz };
     let time = |secs: u32| clock.at(secs);
-    let dep = u32::try_from(at.timestamp() - origin)
+    // The query instant in the frame: when to leave, or (arrive-by) the deadline.
+    let when = u32::try_from(at.timestamp() - origin)
         .map_err(|_| PlanError::Internal("query time outside its search frame".into()))?;
     let snap = |p: LatLon| -> Result<End, PlanError> {
         match streets {
@@ -330,57 +340,130 @@ pub(crate) fn plan(
     // Access and egress walks.
     let access = q.stops_near(&from, f64::from(req.max_access_m), false);
     let egress = q.stops_near(&to, f64::from(req.max_access_m), true);
-    let origins: Vec<(u32, u32)> = access
-        .iter()
-        .map(|(s, w)| (*s, dep.saturating_add(w.secs)))
-        .collect();
-    let targets: Vec<(u32, u32)> = egress.iter().map(|(s, w)| (*s, w.secs)).collect();
-    let mut found: Vec<Found> = Vec::new();
-    if !origins.is_empty() && !targets.is_empty() {
-        let hops = Hops {
-            scale: DETOUR_FACTOR / req.walk_speed_mps,
-            max_m: req.max_transfer_m,
-        };
-        let hops = if req.walk_speed_mps == 1.3 {
-            Hops { scale: 1.0, ..hops }
-        } else {
-            hops
-        };
-        found = raptor_multi(
-            pack,
-            &days,
-            req.max_transfers.min(MAX_TRANSFERS),
-            &origins,
-            &targets,
-            hops,
-        )
-        .map_err(|e| match e {
-            QueryError::DateOutsideFeed { .. } => PlanError::DateOutsideFeed,
-            e => PlanError::Internal(e.to_string()),
-        })?;
-    }
-    // Walking from stop to stop is not a ride: the direct walk covers it.
-    found.retain(|f| f.journey.rides > 0);
-    // 5-minute rule among rides.
-    found.sort_by_key(|f| (f.journey.rides, f.arrival));
+    let hops = Hops {
+        scale: DETOUR_FACTOR / req.walk_speed_mps,
+        max_m: req.max_transfer_m,
+    };
+    let hops = if req.walk_speed_mps == 1.3 {
+        Hops { scale: 1.0, ..hops }
+    } else {
+        hops
+    };
+    let limit = req.max_transfers.min(MAX_TRANSFERS);
+    let error = |e: QueryError| match e {
+        QueryError::DateOutsideFeed { .. } => PlanError::DateOutsideFeed,
+        e => PlanError::Internal(e.to_string()),
+    };
+    // Forward: journeys with at least one ride leaving the door at `door`
+    // or later, at most `limit` transfers.
+    let forward = |door: u32, limit: u8| -> Result<Vec<Found>, PlanError> {
+        let origins: Vec<(u32, u32)> = access
+            .iter()
+            .map(|(s, w)| (*s, door.saturating_add(w.secs)))
+            .collect();
+        let targets: Vec<(u32, u32)> = egress.iter().map(|(s, w)| (*s, w.secs)).collect();
+        if origins.is_empty() || targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut found =
+            raptor_multi(pack, &days, limit, &origins, &targets, hops).map_err(error)?;
+        // Walking from stop to stop is not a ride: the direct walk covers it.
+        found.retain(|f| f.journey.rides > 0);
+        Ok(found)
+    };
+    // Backward: the latest door departure per number of rides that still
+    // reaches the door by `deadline` (plan M8 step 2).
+    let backward = |deadline: u32, limit: u8| -> Result<Vec<(u8, u32)>, PlanError> {
+        let targets: Vec<(u32, u32)> = egress
+            .iter()
+            .filter_map(|(s, w)| Some((*s, deadline.checked_sub(w.secs)?)))
+            .collect();
+        let origins: Vec<(u32, u32)> = access.iter().map(|(s, w)| (*s, w.secs)).collect();
+        if origins.is_empty() || targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        latest_departures(pack, incoming, &days, limit, &targets, &origins, hops).map_err(error)
+    };
+    let access_secs = |s: u32| access.iter().find(|a| a.0 == s).map_or(0, |a| a.1.secs);
+    // The earliest arrival depart-at would show (after its 5-minute rule).
+    let best_of = |found: Vec<Found>| {
+        five_minutes(found)
+            .into_iter()
+            .min_by_key(|f| (f.arrival, f.journey.rides))
+    };
+
     let mut rides: Vec<Found> = Vec::new();
-    for f in found {
-        let better = rides
-            .last()
-            .is_none_or(|k| f.arrival.saturating_add(MORE_RIDES_MIN_GAIN_SECS) <= k.arrival);
-        if better {
-            rides.push(f);
+    if !arrive_by {
+        rides = five_minutes(forward(when, limit)?);
+        // Depart-late pass (spec §8.1 step 7): leave as late as still arrives
+        // as early, with no more rides.
+        for f in rides.iter_mut() {
+            let lim = f.journey.rides.saturating_sub(1);
+            let door = door_departure(f, access_secs(f.origin));
+            let Some(&(_, d)) = backward(f.arrival, lim)?.last() else {
+                continue;
+            };
+            if d > door {
+                if let Some(g) = best_of(forward(d, lim)?) {
+                    if g.arrival <= f.arrival && g.journey.rides <= f.journey.rides {
+                        *f = g;
+                    }
+                }
+            }
+        }
+    } else {
+        // Latest departure per number of rides (plan M8 DoD: no later
+        // departure within the transfer limit is missed, so no 5-minute rule).
+        let picks = backward(when, limit)?;
+        // Each itinerary is the forward search from its departure, so it also
+        // arrives as early as it can (step 4); the latest may use any rides.
+        let last = picks.len().saturating_sub(1);
+        for (j, &(r, d)) in picks.iter().enumerate() {
+            let lim = if j == last {
+                limit
+            } else {
+                r.saturating_sub(1)
+            };
+            // Only journeys that meet the deadline (no 5-minute rule: it could
+            // prefer one that arrives too late, review MF1), ranked as step 5:
+            // latest departure, then fewer rides, then earliest arrival.
+            let ok = forward(d, lim)?.into_iter().filter(|f| f.arrival <= when);
+            let rank = |f: &Found| {
+                let dep = door_departure(f, access_secs(f.origin));
+                (std::cmp::Reverse(dep), f.journey.rides, f.arrival)
+            };
+            if let Some(g) = ok.min_by_key(rank) {
+                rides.push(g);
+            }
         }
     }
-    let best_ride = rides.iter().map(|f| f.arrival).min();
     let walk = q.direct(&from, &to);
 
-    // (arrival, rides, itinerary, rides an approximate frequency trip)
-    let mut out: Vec<(u32, u8, Itinerary, bool)> = Vec::new();
+    // (departure, arrival, rides, itinerary, rides an approximate frequency trip)
+    let mut out: Vec<(u32, u32, u8, Itinerary, bool)> = Vec::new();
     let mut unlinked: Vec<u32> = Vec::new();
     if let Some((w, line)) = walk {
-        let arr = dep.saturating_add(w.secs);
-        if best_ride.is_none_or(|b| arr <= b.saturating_add(WALK_BONUS_SECS)) {
+        // Depart-at: leave now; arrive-by: leave as late as still arrives by the deadline.
+        let (dep, arr) = if arrive_by {
+            (when.saturating_sub(w.secs), when)
+        } else {
+            (when, when.saturating_add(w.secs))
+        };
+        // Offered only when competitive (spec §9), mirrored for arrive-by.
+        let competitive = if arrive_by {
+            rides
+                .iter()
+                .map(|f| door_departure(f, access_secs(f.origin)))
+                .max()
+                .is_none_or(|b| dep.saturating_add(WALK_BONUS_SECS) >= b)
+        } else {
+            rides
+                .iter()
+                .map(|f| f.arrival)
+                .min()
+                .is_none_or(|b| arr <= b.saturating_add(WALK_BONUS_SECS))
+        };
+        if competitive {
             let leg = Leg::Walk {
                 start: time(dep),
                 end: time(arr),
@@ -390,6 +473,7 @@ pub(crate) fn plan(
                 geometry: Some(Polyline(line)),
             };
             out.push((
+                dep,
                 arr,
                 0,
                 Itinerary {
@@ -413,13 +497,20 @@ pub(crate) fn plan(
         };
         let shifts: Vec<u32> = days.iter().map(|d| d.1).collect();
         let (it, approx) = q.itinerary(&clock, &shifts, &from, &to, f, &acc, &egr, &mut unlinked);
-        out.push((f.arrival, f.journey.rides, it, approx));
+        let dep = door_departure(f, acc.secs);
+        out.push((dep, f.arrival, f.journey.rides, it, approx));
     }
-    // Best in (arrival, rides): drop anything another itinerary matches or beats.
-    out.sort_by_key(|o| (o.0, o.1));
+    // Depart-at: best in (arrival, rides). Arrive-by (step 5): latest
+    // departure, then fewer rides, less walking, earliest arrival. Drop
+    // anything another itinerary matches or beats.
+    if arrive_by {
+        out.sort_by_key(|o| (std::cmp::Reverse(o.0), o.2, o.3.walk_m, o.1));
+    } else {
+        out.sort_by_key(|o| (o.1, o.2));
+    }
     let mut kept: Vec<(Itinerary, bool)> = Vec::new();
     let mut fewest = u8::MAX;
-    for (_, r, it, approx) in out {
+    for (_, _, r, it, approx) in out {
         if r < fewest {
             fewest = r;
             kept.push((it, approx));
@@ -468,6 +559,47 @@ pub(crate) fn plan(
         itineraries: kept,
         warnings,
     })
+}
+
+/// The 5-minute rule: a journey with more rides is kept only when it arrives
+/// at least 5 minutes earlier than every one with fewer rides.
+fn five_minutes(mut found: Vec<Found>) -> Vec<Found> {
+    found.sort_by_key(|f| (f.journey.rides, f.arrival));
+    let mut kept: Vec<Found> = Vec::new();
+    for f in found {
+        let better = kept
+            .last()
+            .is_none_or(|k| f.arrival.saturating_add(MORE_RIDES_MIN_GAIN_SECS) <= k.arrival);
+        if better {
+            kept.push(f);
+        }
+    }
+    kept
+}
+
+/// When a journey leaves the door: its first boarding minus the walks
+/// before it (no waiting at the origin).
+fn door_departure(f: &Found, access_secs: u32) -> u32 {
+    let first_board = f
+        .journey
+        .legs
+        .iter()
+        .find_map(|l| match l {
+            rustline_model::Leg::Transit { dep, .. } => Some(dep.0),
+            _ => None,
+        })
+        .unwrap_or(f.journey.dep.0);
+    let pre: u32 = f
+        .journey
+        .legs
+        .iter()
+        .take_while(|l| matches!(l, rustline_model::Leg::Walk { .. }))
+        .map(|l| match l {
+            rustline_model::Leg::Walk { secs, .. } => *secs,
+            _ => 0,
+        })
+        .sum();
+    first_board.saturating_sub(pre).saturating_sub(access_secs)
 }
 
 struct Query<'a> {

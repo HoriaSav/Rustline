@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use rustline_ffi::api::{
-    FfiPlanRequest, FfiPlanResponse, RustlineEngine, RustlineException as FfiError,
+    FfiPlanRequest, FfiPlanResponse, FfiTimeKind, RustlineEngine, RustlineException as FfiError,
 };
 
 pub const KNOWN_CODES: &[&str] = &[
@@ -176,8 +176,9 @@ pub fn req(from: (f64, f64), to: (f64, f64), t: (i64, i32)) -> FfiPlanRequest {
         from_lon: from.1,
         to_lat: to.0,
         to_lon: to.1,
-        depart_at_ms: t.0,
-        depart_offset_secs: t.1,
+        time_kind: FfiTimeKind::DepartAt,
+        time_ms: t.0,
+        time_offset_secs: t.1,
         max_results: 3,
         max_access_m: Some(400),
         walk_speed_mps: None,
@@ -249,8 +250,8 @@ pub fn times(r: &FfiPlanResponse) -> Vec<(i64, i32)> {
 pub fn core_summary(pack_bytes: &[u8], r: &FfiPlanRequest) -> Vec<(i64, i32, i64, i32)> {
     use chrono::TimeZone;
     let e = rustline_core::Engine::from_bytes(pack_bytes).unwrap();
-    let off = chrono::FixedOffset::east_opt(r.depart_offset_secs).unwrap();
-    let t = off.timestamp_millis_opt(r.depart_at_ms).single().unwrap();
+    let off = chrono::FixedOffset::east_opt(r.time_offset_secs).unwrap();
+    let t = off.timestamp_millis_opt(r.time_ms).single().unwrap();
     let cr = rustline_core::PlanRequest {
         from: rustline_model::LatLon::new(r.from_lat, r.from_lon),
         to: rustline_model::LatLon::new(r.to_lat, r.to_lon),

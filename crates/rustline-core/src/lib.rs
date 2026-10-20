@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+mod back;
 mod build;
 #[cfg(feature = "oracle")]
 pub mod oracle;
@@ -49,6 +50,8 @@ pub fn check_installable(file: &rustline_pack::CheckedFile) -> Result<(), PackEr
 pub struct Engine {
     pack: Pack,
     streets: Option<street::Streets>,
+    /// Walking links by destination stop, for arrive-by (M8).
+    incoming: back::Incoming,
     /// The feed's timezone, parsed once (M5 step 1).
     tz: chrono_tz::Tz,
 }
@@ -113,7 +116,13 @@ impl Engine {
         let tz = check_timezone(&pack.meta().timezone)?;
         let streets =
             street::Streets::new(pack.timetable(), LINK_MAX_M).map_err(PackError::Corrupt)?;
-        Ok(Engine { pack, streets, tz })
+        let incoming = back::Incoming::new(pack.timetable());
+        Ok(Engine {
+            pack,
+            streets,
+            incoming,
+            tz,
+        })
     }
 
     /// The feed's timezone.
@@ -146,7 +155,13 @@ impl Engine {
 
     /// Door-to-door itineraries; see [`PlanRequest`] and the `plan` module docs.
     pub fn plan(&self, req: &PlanRequest) -> Result<PlanResponse, PlanError> {
-        plan::plan(&self.pack, self.streets.as_ref(), self.tz, req)
+        plan::plan(
+            &self.pack,
+            self.streets.as_ref(),
+            &self.incoming,
+            self.tz,
+            req,
+        )
     }
 
     /// Counts, sha and validity of the loaded pack.
