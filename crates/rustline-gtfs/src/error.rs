@@ -18,6 +18,15 @@ pub enum GtfsError {
         #[source]
         source: gtfs_structures::Error,
     },
+    /// trips.txt or stop_times.txt can't be read at all: no header, a
+    /// missing required column, or an I/O error (M7 own reader).
+    #[error("{file}: {message}")]
+    Csv {
+        /// The file inside the feed.
+        file: &'static str,
+        /// What is wrong.
+        message: String,
+    },
     /// The parser panicked (e.g. an hour value so large it overflows).
     #[error("the GTFS parser crashed while reading {path} (bad value in the feed?): {message}")]
     ParserPanic {

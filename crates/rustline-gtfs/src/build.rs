@@ -35,7 +35,8 @@ pub const MAX_FREQUENCY_STOP_TIMES: u64 = 5_000_000;
 pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), GtfsError> {
     let g = &feed.gtfs;
     let timezone = feed.timezone()?;
-    let mut report = ReportBuilder::default();
+    // Rows the reader already dropped or padded (M7).
+    let mut report = feed.issues.clone();
 
     let (stops, stop_idx) = build_stops(feed, &mut report);
     let (routes, route_idx) = build_routes(feed);
@@ -512,6 +513,13 @@ fn trip_times(
     }
     let mut raw: Vec<&gtfs_structures::StopTime> = trip.stop_times.iter().collect();
     raw.sort_by_key(|st| st.stop_sequence);
+    if raw
+        .windows(2)
+        .any(|w| w[0].stop_sequence == w[1].stop_sequence)
+    {
+        report.add(IssueKind::DuplicateStopSequence, 1, id);
+        return None;
+    }
 
     // (arrival, departure) where known.
     let known: Vec<Option<(u32, u32)>> = raw

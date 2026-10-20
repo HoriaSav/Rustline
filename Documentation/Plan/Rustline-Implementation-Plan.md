@@ -21,14 +21,14 @@
 
 | Open question | Default used in this plan | Where it matters |
 |---|---|---|
-| Q1 On-device or server first | **On-device** (confirmed) | M6 before M7 |
+| Q1 On-device or server first | **On-device** (confirmed) | M6 before M12 |
 | Q2 Public open-source? | Public repo, **MIT OR Apache-2.0**, not published to crates.io yet | M0 licence |
 | Q3 Brașov only or 13 feeds | **Brașov only** | Size/perf targets in M2, M5, M6 |
-| Q4 iOS? | **Android first**, iOS skipped until after M6 | M0 targets, M6 |
-| Q5 Who builds packs | **Your PC** with `rustline build-pack` | M2, M4; backend later in M9 |
+| Q4 iOS? | **Android first**, iOS in M11 (Savin, 2026-10-20) | M0 targets, M6, M11 |
+| Q5 Who builds packs | **Your PC** with `rustline build-pack` | M2, M4; backend later in M14 |
 | Q6 Defaults (walk speed etc.) | Spec defaults: 1.3 m/s, 1 000 m access, 500 m transfer, 3 transfers | `PlanRequest::default()` |
-| Q7 Arrive-by in v1? | **No** — M8 | M3 API only has `DepartAt` |
-| Q8 RATBV realtime | Assume none | M9 |
+| Q7 Arrive-by in v1? | **Yes** — M8 (Savin, 2026-10-20) | M3 API only has `DepartAt` |
+| Q8 RATBV realtime | Assume none | M14 |
 | Q9 Walk-only always shown? | Shown **only when competitive** (spec §9 rule) | M4 ranking |
 | Q10 Who writes the core | **You**, with review | Whole plan |
 
@@ -145,6 +145,11 @@ Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-
 - **Types that passed validation must not expose mutable internals** (no pub fields or `DerefMut` on validated data).
 - **Algorithms with several arrival kinds (ride/walk) must keep separate labels**; test with an oracle on the largest feed across several seeds.
 
+### Decisions (Leader, 2026-10-20)
+- Savin reordered the plan after M6: **M7** cleanup (old M8's "Moved from M1" gaps + M6 Reviewer leftovers R1–R6), **M8** arrive-by, **M9** rRAPTOR options, **M10** GitHub CI, **M11** iOS build (GitHub macOS runners, dev PC is Linux), **M12** server (optional, not now; was M7), **M13** RoTransit integration (not now; M6 steps 4–6), **M14** future (was M9; also holds old M8's McRAPTOR walking criterion and thesis charts).
+- RoTransit integration stays last. The engine stays generic for any GTFS feed; Builder checklist §11 applies to every new milestone.
+- References elsewhere ("moved to M8" in README Known gaps) now read M7.
+
 ### Milestone overview
 
 | # | Name | One line | Time (est.) |
@@ -156,9 +161,14 @@ Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-
 | M4 | Streets | Walking: OSM graph, snapping, access/egress, walk-only | 10–14 evenings |
 | M5 | Calendar & edge cases | Midnight, DST, holidays, frequencies, transfers.txt, benchmarks | 6–9 evenings |
 | M6 | Flutter integration | Rustline running offline on your A54 inside RoTransit | 10–14 evenings |
-| M7 | Server (optional) | Same engine behind `POST /v1/plan` | 3–5 evenings |
-| M8 | Quality+ | Walking as a criterion, arrive-by, range queries, thesis charts | 10–15 evenings |
-| M9 | Future | Backend-served packs, realtime, multi-city (own spec) | — |
+| M7 | Cleanup | M1 Known gaps #1–3, #5, #6 + M6 Reviewer leftovers | 5–8 evenings |
+| M8 | Arrive-by | "Be there by 09:00": reverse RAPTOR, depart-late pass | 6–9 evenings |
+| M9 | rRAPTOR options | Pareto (arrival vs transfers) + departure-window range queries | 6–10 evenings |
+| M10 | GitHub CI | fmt, clippy, tests debug+release, Flutter tests, Android build | 2–4 evenings |
+| M11 | iOS build | xcframework + Cargokit iOS, tested on GitHub macOS runners | 4–6 evenings |
+| M12 | Server (optional, not now) | Same engine behind `POST /v1/plan` | 3–5 evenings |
+| M13 | RoTransit integration (not now) | M6 steps 4–6 inside RoTransit | 6–10 evenings |
+| M14 | Future | Backend-served packs, realtime, multi-city, McRAPTOR walking, thesis charts (own spec) | — |
 
 Total to a working phone prototype (M0–M6): roughly **50–70 evenings (est.)**.
 
@@ -226,7 +236,7 @@ lto = "fat"
 codegen-units = 1
 strip = true
 ```
-  Leave out `rustline-ffi` and `rustline-server` for now (M0 step 9 and M7).
+  Leave out `rustline-ffi` and `rustline-server` for now (M0 step 9 and M12).
 - *Why:* a workspace builds all crates together with one `Cargo.lock`. Separate crates keep the heavy parsers (`-gtfs`, `-osm`) off the phone ([spec §6.2 rule](Rustline-Spec.md#62-cargo-workspace-layout)). The release profile is the one from [spec §12](Rustline-Spec.md#12-performance-targets-and-budgets-all-est-to-be-validated-in-m5) (`panic = "abort"` is added later, carefully, because FFI needs to catch panics).
 
 **5. Wire crate dependencies (empty for now)**
@@ -827,7 +837,7 @@ cargo bench --locked -p rustline-core
 
 **Interfaces**
 ```rust
-pub enum TimeSpec { DepartAt(DateTime<FixedOffset>) }       // ArriveBy comes in M8
+pub enum TimeSpec { DepartAt(DateTime<FixedOffset>) }       // ArriveBy comes in M8 (arrive-by milestone)
 pub enum Warning { FeedExpiresSoon { valid_to: NaiveDate }, ApproximateFrequencyTrip, StopNotLinkedToStreets(StopIdx) }
 fn to_service_time(tz: Tz, t: DateTime<FixedOffset>) -> Vec<(NaiveDate, Seconds)>;  // D-1, D (and D+1)
 ```
@@ -841,7 +851,7 @@ fn to_service_time(tz: Tz, t: DateTime<FixedOffset>) -> Vec<(NaiveDate, Seconds)
 - [ ] Invalid IANA timezone rejected at build time (M1 gap #4 test un-ignored).
 - [ ] Property tests (spec §15) pass on Brașov with 1 000 cases and fixed seed; run via a documented `--test` name.
 - [ ] `criterion` bench: Brașov p50/p95 for 1 000 fixed queries; **PC p95 < 20 ms**; numbers + CPU model written into spec §12.
-- [ ] Every M1 Known gap is now fixed or explicitly moved to M8 with Savin's OK.
+- [ ] Every M1 Known gap is now fixed or explicitly moved to M7 (cleanup; was M8 before the 2026-10-20 reorder) with Savin's OK.
 - [ ] Safety (§11): searching D-1/D/D+1 at most triples the work (measured); time arithmetic with shifted days is checked (no wrap for times ≥ 48:00 or near `u32::MAX`); frequency expansion is capped (trips per frequency row and total) so a crafted `headway_secs=1` over 48 h cannot exhaust memory.
 - [ ] All items in **Edge cases (must be tested)** below have a test or a Known gap.
 
@@ -1022,10 +1032,222 @@ Airplane mode on → plan a journey → it still works.
 
 ---
 
-## M7 — Server (optional)
+## M7 — Cleanup (known gaps + M6 Reviewer leftovers)
+
+**Goal:** close every open Known gap from M1 and the small M6 Reviewer leftovers, so later milestones build on a clean base.
+**Prerequisites:** M6.
+**Spec:** [§7.2](Rustline-Spec.md#7-ingest-and-validation), [§11.3](Rustline-Spec.md#113-dart-via-frb-rustline-ffi), [§12](Rustline-Spec.md#12-performance-targets-and-budgets-all-est-to-be-validated-in-m5).
+
+### Moved from M1 (Savin OK, 2026-10-18)
+- Own lenient stop_times/trips reader that fixes README Known gaps #1 (time range check), #2 (huge hours, `checked_*` arithmetic), #3 (duplicate trip_id), #5 (short CSV rows / strict loading) and #6 (duplicate stop_sequence), each with its un-ignored test.
+
+### From the M6 review (Savin, 2026-10-20)
+- **R1 Stricter leftover matching in `install_pack`:** only delete files that match exactly `{name}.{pid}.{n}.tmp` (digits only, same `name`), never a prefix match; test that `brasov.rlp.backup.tmp`, `brasov.rlpx.1.2.tmp` and a symlink are left alone.
+- **R2 Retry `flock` on `EINTR`:** loop on `EINTR` (bounded retries, e.g. 100), any other errno → `pack_io`. Test with an injected `EINTR` (debug-only hook).
+- **R3 Panic hook text:** the quiet hook prints one fixed line (e.g. `rustline: internal error`), no payload, no file:line; test captures stderr.
+- **R4 Doc line on `debug_inject_panic`:** Rust doc + generated Dart doc say it is test-only and returns `invalid_request` in release.
+- **R5 Streaming install:** `install_pack` copies/decompresses in ≈ 1 MiB chunks; the whole pack is never held in memory. Peak RSS during install of the MBTA pack recorded before/after (target: install adds < 16 MiB).
+- **R6 Trim `flutter_rust_bridge` features:** `default-features = false` plus only what is used; `.so` size before/after recorded; all FFI tests still pass.
+
+### M7 decisions (Leader, 2026-10-20)
+1. **Lenient loading wins.** A bad time drops that row with a warning; a trip left with fewer than 2 stop times is dropped. `edge_cases.rs::garbage_times_reject_the_feed` becomes `garbage_times_drop_the_row`. A missing required column or a missing required file is still a hard error.
+2. **Issue kinds (Tester's names):** `InvalidTime`, `DuplicateTripId`, `DuplicateStopSequence`, `ShortRow`, `RowTooLong`, `InvalidUtf8`. All are warnings (the row or trip is dropped), not errors.
+3. **Hour cap 48 h:** `47:59:59` loads; `48:00:00` and above is an `InvalidTime` row.
+4. **Streaming install:** copy in chunks to the per-install temp file, then fsync; validate by opening the temp file from disk (no full in-memory read); only then rename. Peak added memory < 16 MiB.
+5. **Leftovers:** don't delete the old `{name}.tmp`; clean up only exact `{name}.{pid}.{n}.tmp` names, and only under the lock.
+6. **R2 hook:** `debug_flock_fail(errno, times)`, retry bound 100.
+7. **R3 panic text:** exactly `rustline: internal error`.
+8. **OSM baseline:** before changing code, build the OSM packs from commit 9f2718c with the same `--osm` bbox (separate git worktree in /tmp, removed afterwards), so the byte-identical check is fair.
+
+Second round (Leader, 2026-10-20, after the first M7 report):
+9. **48 h cap kept**, and the m5 test edits that follow from it (`47:10` → `47:50`, `trip_just_under_the_48_00_cap`).
+10. **`TooFewStopTimes` is a warning:** the trip is dropped, the feed is kept (as in decision 1).
+11. **Body check before the rename:** a pack with a valid CRC32 but a bad body must not replace a good installed pack. `install_pack` checks the body by streaming it from the temp file (`verify_pack_file`: the rkyv layout rules and the `check()` rules, read through a small page cache, no full body in memory); added memory < 16 MiB, measured. A failure is `pack_corrupt` and the old pack stays. Test: `rustline-ffi/tests/m7_body.rs`. Header-only counts in the result are fine.
+12. **`UnknownTrip` warning:** a stop_times.txt row whose `trip_id` is not in trips.txt is dropped and reported.
+13. **OK from the first report:** bad UTF-8 bytes become U+FFFD (row kept, `InvalidUtf8`); a stop_times row with an unknown stop drops its trip (`UnknownStop`).
+
+### Steps
+1. Own CSV reader for `stop_times.txt` and `trips.txt` (spec §7.2): streaming, header-mapped, short rows padded/reported, `checked_*` time parse (`HH` up to a documented cap, `MM`/`SS` < 60).
+2. Duplicate `trip_id` → first wins, others reported; duplicate `stop_sequence` → trip reported and skipped (or documented order rule).
+3. Un-ignore the Known-gap tests #1, #2, #3, #5, #6; remove them from README "Known gaps (M1)".
+4. R1–R6 above in `rustline-ffi`.
+5. Multi-feed check (§8): `sample-feed-1.zip` now passes `inspect` and `build-pack`; all pack outputs for the other feeds unchanged (sha256 compared) unless the change is explained.
+
+### Done when
+- [ ] Known gaps #1, #2, #3, #5, #6 fixed, tests un-ignored, README updated
+- [ ] R1–R6 done, each with a test or a recorded measurement
+- [ ] Google sample feed builds a pack
+
+### Definition of done (strict)
+- [ ] Release *and* debug: `9999999:00:00`, `24:60:00`, `-1:00:00`, empty time → reported row, never a wrap or panic.
+- [ ] Packs for Brașov/Cluj/Timișoara/București/MBTA byte-identical to M6 output, or every difference explained in the report.
+- [ ] Peak RSS of `build-pack` on MBTA not worse than M6 by more than 10 %.
+- [ ] Safety (§11): the reader never sizes a buffer from a header/row count; row length capped (e.g. 64 KiB); stop_times cap from M5 still applies.
+- [ ] All items in **Edge cases (must be tested)** below have a test.
+- **Edge cases (must be tested):** BOM in header; header-only file; columns in any order; extra unknown columns; quoted fields with commas/newlines; CRLF; row with fewer fields than header; row longer than the cap; non-UTF-8 bytes; duplicate trip_id with different routes; duplicate stop_sequence; stop_sequence gaps (allowed); times only on first/last stop (interpolation unchanged); two `install_pack` writers + a stale leftover of another name; EINTR during lock; install from a file that grows/shrinks during copy; disk full mid-stream.
+- **Tester will check:** all M1–M6 tests still pass in debug and release; multi-feed table; RSS numbers.
+
+**Time (est.):** 5–8 evenings.
+
+---
+
+## M8 — Arrive-by searches
+
+**Goal:** answer "I need to be there by 09:00": the journey that arrives no later than the given time and leaves as late as possible. Works for any GTFS feed.
+**Prerequisites:** M7.
+**Spec:** [§8](Rustline-Spec.md#8-algorithms-and-why), [§11](Rustline-Spec.md#11-public-apis).
+
+### Steps
+1. **API:** add `TimeSpec::ArriveBy(DateTime<FixedOffset>)` in `rustline-core`; `FfiPlanRequest` gets `time_kind` (`depart_at` | `arrive_by`) next to the existing millis+offset; CLI gets `--arrive-by` (mutually exclusive with `--at`). *Why:* one request type, the engine chooses the direction.
+2. **Reverse RAPTOR:** scan rounds backwards: from the egress stops at `T − egress`, for each route take the *latest* trip that reaches the stop by the label time, walk footpaths backwards, end at access stops. Keep ride and walk labels separate (§11 last rule).
+3. **Service days:** search D, D−1 and D+1 with the same DST-aware day shifts as M5 (82 800 / 86 400 / 90 000 s), `checked_*` everywhere.
+4. **Depart-late pass** (spec §8.1 step 7): for a depart-at answer, run backwards from its arrival to remove waiting at the origin; for arrive-by, run forwards from the found departure to tighten arrival. Neither may make the result worse.
+5. **Tie-breaks (documented, deterministic):** latest departure, then fewer rides, then less walking, then earliest arrival, then lowest route/trip index.
+6. **Walking-only:** if walking alone reaches the destination by `T`, it is offered under the same "only when competitive" rule as depart-at (spec §9).
+7. **Warnings/errors:** reuse `NoRoute`, `DateOutsideFeed` (decided on the query's local date), `FeedExpiresSoon`, `ApproximateFrequencyTrip`; transfer types 0–3 from M5 apply unchanged.
+8. Dart: `RustlinePlanner` accepts arrive-by; example app has a toggle.
+
+### How to check it works
+```bash
+cargo run --locked --release -p rustline-cli -- plan --pack fixtures/out/brasov.rlp \
+  --from 45.6427,25.5887 --to 45.6579,25.6012 --arrive-by 2026-10-15T09:00:00+03:00
+```
+Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
+
+### Done when
+- [ ] Arrive-by works in core, CLI, FFI and the example app
+- [ ] Brute-force oracle agrees on random queries
+- [ ] Golden arrive-by queries added and reviewed
+
+### Definition of done (strict)
+- [ ] Oracle: for 1 000 random queries per seed (3 seeds) on a fixture and on the Brașov feed, arrival ≤ requested time, and no journey with a later departure (within the same transfer limit) arrives by the requested time (brute force / reversed CSA).
+- [ ] Symmetry property: for an arrive-by answer with departure `d`, a depart-at query at `d` arrives no later than the requested time.
+- [ ] Depart-late pass never makes arrival later (depart-at) or departure earlier (arrive-by) — property test.
+- [ ] PC p95 of arrive-by within 1.2× of depart-at p95 on Brașov and MBTA (criterion, fixed seeds); emulator p95 recorded; A54 left for Savin.
+- [ ] Safety (§11): round count capped by `max_transfers`, backwards footpath scan bounded, reconstruction length bounded; hostile pack test for the reverse indexes; peak RSS recorded.
+- [ ] All items in **Edge cases (must be tested)** below have a test.
+- **Edge cases (must be tested):**
+  - *DST:* arrive-by time inside the spring-forward gap (moves forward, same rule as `--at`); inside the fall-back overlap (earlier instant); a journey that crosses the DST change; D−1 day of 23 h and 25 h.
+  - *After midnight:* arrive-by 00:30 served by a D−1 trip with `24:xx` times; arrive-by 23:50 where the only trip is on D; trips with `>48:00` times.
+  - *No route:* destination unreachable; arrive-by before the first trip of the day; requested time on a date with no service; date outside the feed (local date, incl. one day before `valid_from`).
+  - *Tie-breaks:* two trips with the same departure and arrival; same departure, different rides; equal everything → stable by index across runs and builds.
+  - *Walking-only:* origin == destination; origin within walking distance (walk wins / transit wins); no stop within access distance.
+  - Frequency-based trips (exact and approximate); transfer type 2 without `min_transfer_time`; type 3 forbidden transfer on the only path; `max_transfers = 0`; arrive-by in the past relative to the device clock (allowed, no special case); feed in a non-Romanian timezone (MBTA).
+- **Tester will check:** oracle across seeds in debug and release; golden diffs one by one; CLI command verbatim.
+
+### Common pitfalls
+- Reusing forward "earliest trip" search backwards → you need "latest trip arriving by"; write it separately and test it alone.
+- Mixing up departure/arrival service-day shifts around DST.
+
+### Carried from M7 review
+- [ ] Test that the in-memory and on-disk grid checks (`build_grid` / `check_disk_grid`) agree: the globe case and one just under the cell cap.
+- [ ] Comment at `Grid::for_box` that the snapping budget depends on its highest-latitude choice.
+- [ ] `open_with_limit` with a smaller limit can fail on a pack installed under the 256 MiB default: document it, or pass the limit to `install_pack`.
+
+**Time (est.):** 6–9 evenings.
+
+---
+
+## M9 — rRAPTOR: several good options
+
+**Goal:** one search returns a small set of good choices — the Pareto set of (arrival time, number of transfers), and over a departure window ("leave between 08:00 and 08:30") — instead of a single answer.
+**Prerequisites:** M8.
+**Spec:** [§8](Rustline-Spec.md#8-algorithms-and-why), [§9](Rustline-Spec.md#9-multi-criteria).
+
+### Steps
+1. **Pareto per round:** RAPTOR already computes the best arrival after *k* rides in round *k*; collect the target label per round → (arrival, transfers) front. Keep only non-dominated journeys (strictly better in one, not worse in the other).
+2. **Range queries (rRAPTOR):** for a window `[t0, t1]`, collect departure times at access stops in the window, run rounds from latest to earliest departure, *reusing* labels (labels only improve). Arrive-by gets the mirrored range.
+3. **Result set:** dedupe identical journeys; sort by departure then arrival; cap at `max_results` (default 5, hard cap 20) with a documented rule for which ones survive (always keep fastest and fewest-transfers).
+4. **API:** `PlanRequest::window_secs` (default 0 = current behaviour), FFI and CLI `--window`; each itinerary marked with tags (`fastest`, `fewest_transfers`, `leaves_latest`).
+5. Golden tests updated via `cargo insta review`; every intentional change approved.
+
+### Done when
+- [ ] Results are Pareto on (arrival, transfers); range queries work in CLI, FFI and example app
+- [ ] Performance budget met or regression reported
+
+### Definition of done (strict)
+- [ ] Dominance property test (proptest + 1 000 random queries × 3 seeds): no returned journey is dominated by another returned one, and every Pareto-optimal (arrival, transfers) pair found by a brute-force oracle (per-k CSA) is present (unless removed by the cap, then the cap rule is checked).
+- [ ] Range property: the answer for window `[t0, t1]` contains, for every departure `t` in the window, a journey at least as good as the single query at `t`.
+- [ ] Window 0 gives exactly the M8 results (golden byte-equal).
+- [ ] **Perf budget:** PC p95 with window 0 ≤ 1.1× the current M6/M8 p95; with a 30 min window ≤ 3× (Brașov and MBTA, criterion fixed seeds). Emulator p95 recorded. Over budget → report, do not merge silently.
+- [ ] Safety (§11): window capped (e.g. ≤ 2 h, documented), number of departures per range capped (e.g. 256), rounds capped by `max_transfers` (hard max 8), result cap 20; worst case (many ties on MBTA) timed and peak RSS recorded.
+- [ ] All items in **Edge cases (must be tested)** below have a test.
+- **Edge cases (must be tested):**
+  - *Dominance:* equal arrival, different transfers (keep fewer); equal transfers, different arrival; exact ties on both (deterministic pick, same across debug/release); walk-only vs transit in the front.
+  - *Transfer limits:* `max_transfers` 0, 1, the hard max, and over the max (→ `invalid_request`); front where the fastest journey needs more transfers than allowed.
+  - *Cap on options:* more Pareto journeys than `max_results`; `max_results` 0 (→ `invalid_request`) and 1; cap rule keeps fastest + fewest transfers.
+  - *Ranges:* window 0 s; window = cap; over cap (error); window crossing midnight (D/D+1 trips); window across a DST change; no departures in the window; identical journeys from neighbouring departures (dedup).
+  - Arrive-by ranges mirrored; frequency trips inside the window (many departures, capped).
+- **Tester will check:** M3–M8 property tests still pass; golden diffs; perf table PC + emulator.
+
+### Common pitfalls
+- Clearing labels between departures in a range → loses the speed-up and can break the "labels only improve" invariant.
+- Comparing journeys with `==` on floats/walking → use integer seconds/metres.
+
+**Time (est.):** 6–10 evenings.
+
+---
+
+## M10 — GitHub CI
+
+**Goal:** every push and PR runs the full test suite and builds automatically on GitHub, so regressions are caught without anyone running commands by hand.
+**Prerequisites:** M7 (can run in parallel with M8/M9).
+
+### Steps
+1. Extend `.github/workflows/ci.yml` (Ubuntu): `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo test --locked --workspace` in **debug and release**; MSRV job with Rust 1.85.
+2. Flutter job: pinned Flutter version, `flutter analyze` and `flutter test` in `rustline_flutter` and `rustline_flutter/example`; check generated FRB code is up to date (`flutter_rust_bridge_codegen generate` then `git diff --exit-code`).
+3. Android job (`android.yml`): `cargo ndk` for arm64-v8a + x86_64 with NDK 26.1.10909125, `flutter build apk --release` of the example; upload `.so` sizes as a job summary.
+4. Optional emulator job: integration test on an x86_64 emulator (reactivecircus/android-emulator-runner), allowed to be a separate workflow if slow.
+5. Caching (`Swatinem/rust-cache`, Gradle, pub), `concurrency` to cancel superseded runs, `permissions: contents: read`, actions pinned to a commit sha, Dependabot for actions.
+6. Real-feed tests: CI has no feeds (gitignored); either they stay `#[ignore]` in CI, or a job runs `scripts/fetch-fixtures.sh` with the manifest sha256 check and caches the result. Decide and document.
+
+### Done when
+- [ ] CI green on a PR for all jobs; a deliberately failing test/fmt/clippy turns it red
+- [ ] README has a CI badge and says which tests run where
+
+### Definition of done (strict)
+- [ ] All commands `--locked`; same commands as the Builder checklist, copied verbatim.
+- [ ] Total wall time of the required jobs recorded (target < 20 min with warm cache).
+- [ ] No secrets needed for PR jobs; workflows from forks cannot write.
+- [ ] Safety (§11): job `timeout-minutes` on every job; fixture downloads verified by sha256 before use.
+- **Edge cases (must be tested):** cold cache run; Cargo.lock out of date → fails; generated FRB code stale → fails; MSRV dependency bump → MSRV job fails; flaky test → rerun policy documented (no auto-retry hiding failures).
+- **Tester will check:** one green and one intentionally red run linked in the report.
+
+**Time (est.):** 2–4 evenings. (Pushing workflows needs Savin's "push".)
+
+---
+
+## M11 — iOS build
+
+**Goal:** the `rustline_flutter` plugin builds and runs on iOS (device + simulator), tested on GitHub macOS runners because the dev PC is Linux.
+**Prerequisites:** M10.
+
+### Steps
+1. Rust targets `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`; build `rustline-ffi` as a static lib per target and bundle into an **xcframework** (`xcodebuild -create-xcframework`, sim slices merged with `lipo`).
+2. Cargokit iOS: enable the iOS side of the plugin (podspec / Swift Package), set the deployment target (document it, e.g. iOS 13), make sure the Cargokit patch for the library name also covers iOS (`librustline_ffi.a`).
+3. Pack install on iOS: Application Support / Documents path, `flock` + `statvfs` work on iOS (or a documented iOS-specific fallback), excluded from iCloud backup.
+4. `ios.yml` workflow on `macos-latest` (pinned Xcode): build xcframework, `flutter build ios --no-codesign` for the example, run the integration test on an iOS simulator, run `cargo test --locked -p rustline-ffi` on macOS too.
+5. Record static lib size and app size delta; no code signing / App Store in this milestone.
+
+### Done when
+- [ ] `ios.yml` green: xcframework built, example app built, integration test passed on the simulator
+- [ ] Sizes recorded; README explains how to build on a Mac
+
+### Definition of done (strict)
+- [ ] Same FFI tests as Android pass on the simulator (error codes, injected panic → exception, install_pack two-writer test, cancellation).
+- [ ] No iOS-only code path in `rustline-core`; only `rustline-ffi`/plugin may differ, and engine stays generic.
+- [ ] Safety (§11): same caps as Android (256 MiB default); low-disk path tested via the debug free-space override.
+- **Edge cases (must be tested):** simulator on Apple Silicon (arm64-sim) vs Intel (x86_64); app relaunch after kill during install; device timezone ≠ feed timezone; file path with spaces/Unicode; app sandbox path changes between launches (store relative paths).
+- **Tester will check:** workflow logs; a physical-iPhone run is optional and left for Savin.
+
+**Time (est.):** 4–6 evenings.
+
+---
+
+## M12 — Server (optional, not now)
 
 **Goal:** the same engine answers `POST /v1/plan` over HTTP, with identical results to the library.
-**Prerequisites:** M5 (does not need M6).
+**Prerequisites:** M9 (so the server has arrive-by and options). Not scheduled; only if Savin asks.
 **Spec:** [§11.4](Rustline-Spec.md#114-http-json-rustline-server-optional).
 
 ### Steps
@@ -1066,53 +1288,33 @@ curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
 
 ---
 
-## M8 — Quality+
+## M13 — RoTransit integration (not now)
 
-**Goal:** nicer answers and thesis-ready material: walking as a 3rd criterion, arrive-by, "leave between" ranges, charts.
-**Prerequisites:** M6.
-**Spec:** [§8](Rustline-Spec.md#8-algorithms-and-why), [§9](Rustline-Spec.md#9-multi-criteria).
-
-### Moved from M1 (Savin OK, 2026-10-18)
-- Own lenient stop_times/trips reader that fixes README Known gaps #1 (time range check), #2 (huge hours, `checked_*` arithmetic), #3 (duplicate trip_id), #5 (short CSV rows / strict loading) and #6 (duplicate stop_sequence), each with its un-ignored test.
+**Goal:** RoTransit plans journeys offline with Rustline (the parts deferred from M6: steps 4–6).
+**Prerequisites:** M11. **Not to be done now** (Savin, 2026-10-20); kept last on purpose.
 
 ### Steps
-1. **McRAPTOR:** replace single arrival per stop with a small "bag" of labels `(arrival, walk_secs)` and keep only non-dominated ones. *Why:* lets the user see "2 min later but 600 m less walking".
-2. **Depart-late pass** (spec §8.1 step 7): rerun backwards from the found arrival to cut waiting at stops.
-3. **Arrive-by:** reverse RAPTOR (scan backwards in time from the target). Add `TimeSpec::ArriveBy`.
-4. **rRAPTOR range queries:** run for each departure in a window, reusing labels.
-5. **Thesis material:** benchmark charts (`criterion` HTML reports), RAPTOR vs CSA comparison, pack size table, phone vs PC timings. `cargo doc` for the API.
-6. Update golden tests (`cargo insta review`) and approve intentional changes.
-
-### Done when
-- [ ] McRAPTOR returns walking trade-offs; property tests still pass
-- [ ] Arrive-by works in CLI and app
-- [ ] Golden tests updated and reviewed
-- [ ] Charts + docs ready for the thesis
+1. RoTransit branch with `rustline_flutter` as a path/git dependency; bundled pack decompressed via `install_pack`.
+2. Pack freshness banner (`info().feedSha256` vs `/api/feeds`).
+3. Riverpod journey feature: planner screen, depart-at / arrive-by toggle, option list from M9, polyline on the map, links to stop boards.
+4. OSM/feed attribution in the app; A54 measurements (p50/p95, load time, memory).
 
 ### Definition of done (strict)
-- [ ] McRAPTOR bags capped (cap documented); result sets are Pareto on (arrival, rides, walk) – property test.
-- [ ] Arrive-by: for 1 000 random queries, arrival ≤ requested time and no later departure exists with the same arrival bound (checked against brute force on a fixture).
-- [ ] Phone p95 re-measured after McRAPTOR and still < 150 ms, or the regression is reported.
-- [ ] Safety (§11): bag size, range-query window and number of departures per range are hard-capped; worst case (many ties on MBTA) measured for time and peak RSS.
-- **Edge cases (must be tested):** Pareto ties on all three criteria (deterministic pick); bag cap reached; arrive-by before the first trip / after midnight / across DST; arrive-by at origin == destination; range window of 0 s and of 24 h; range crossing midnight; depart-late pass never makes arrival later; walking weight 0.
-- **Tester will check:** M3–M5 property tests still pass; golden diffs reviewed one by one; phone timings.
-
-### Common pitfalls
-- Bags growing large → cap per stop and prune aggressively; re-check phone p95.
-
-**Time (est.):** 10–15 evenings.
+- [ ] All M6 acceptance items that needed RoTransit (APK delta, freshness banner, attribution, airplane-mode run on the A54, RoTransit `main` untouched).
+- [ ] Safety (§11) and the M6 **Edge cases (must be tested)** list apply unchanged, plus arrive-by and multi-option UI states (no route, one option, cap reached).
 
 ---
 
-## M9 — Future (separate spec)
+## M14 — Future (separate spec)
 
-**Edge cases to carry into the M9 spec:** downloaded packs are untrusted (size cap, checksum, version, signature or sha from `/api/feeds` checked before use); interrupted/resumed download; pack newer than the app supports; realtime updates for trips not in the pack, delays > 24 h, cancelled stops; stale realtime data; all Builder checklist §11 items apply.
+**Edge cases to carry into the M14 spec:** downloaded packs are untrusted (size cap, checksum, version, signature or sha from `/api/feeds` checked before use); interrupted/resumed download; pack newer than the app supports; realtime updates for trips not in the pack, delays > 24 h, cancelled stops; stale realtime data; all Builder checklist §11 items apply.
 
 Not planned in detail; write a new spec when you get here ([spec §14](Rustline-Spec.md#14-realtime-future), [§17](Rustline-Spec.md#17-milestones)):
 - **Backend-served packs:** backend_v2 builds a pack when FeedService detects a new sha and serves `/api/feeds/{id}/routing-pack` with the same ETag logic; the app downloads it instead of waiting for an app update.
 - **Realtime:** GTFS‑RT delay overlay (only if RATBV publishes it).
 - **Multi-city:** the other 12 feeds — re-check pack sizes and phone memory.
-- **iOS:** add `aarch64-apple-ios` targets and a macOS CI runner.
+- **Quality+ leftovers (from old M8):** McRAPTOR with walking as a 3rd criterion (capped bags, Pareto on arrival/rides/walk, phone p95 < 150 ms), walking weight, thesis material (criterion charts, RAPTOR vs CSA, pack size table, phone vs PC timings, `cargo doc`).
+- Live delays (GTFS-RT), wheelchair trips, delta pack updates, fares, pack-reader fuzzing.
 
 ---
 
@@ -1128,7 +1330,7 @@ Not planned in detail; write a new spec when you get here ([spec §14](Rustline-
 | `flate2` (zlib-rs) — *not* `osmpbf`/`rstar`, see M4 steps 2 and 4 | M4 | OSM blobs; snapping uses an own grid |
 | `chrono-tz`, `proptest`, `criterion` | M5 | timezone, property tests, benches |
 | `flutter_rust_bridge` | M6 | FFI |
-| `axum`, `tokio`, `schemars`, `tower-http` | M7 | server |
+| `axum`, `tokio`, `schemars`, `tower-http` | M12 | server |
 
 ## Appendix B — Daily loop
 

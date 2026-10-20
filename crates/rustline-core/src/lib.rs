@@ -26,6 +26,25 @@ pub use time::{local_instant, to_service_time};
 
 use rustline_pack::{read_pack, read_pack_with_limit, Pack, PackError};
 
+/// The feed timezone as an IANA name, or [`PackError::Corrupt`]. The one rule
+/// for [`Engine::new`] and for install ([`check_installable`]).
+pub fn check_timezone(name: &str) -> Result<chrono_tz::Tz, PackError> {
+    name.parse()
+        .map_err(|_| PackError::Corrupt(format!("timezone {name:?} is not an IANA timezone name")))
+}
+
+/// What [`Engine::new`] checks beyond `read_pack`, on a pack file checked on
+/// disk (M7 install, Reviewer MF1): the timezone and the street-grid size
+/// rules, with the same code. The stop-snapping scan budget needs no check of
+/// its own: a stop links within [`LINK_MAX_M`] (100 m), less than one 200 m
+/// cell, so its snap looks at no more than 3 × 3 cells, and a grid that passes
+/// the per-cell cap holds at most 9 × `MAX_CELL_ENTRIES` there, below the
+/// budget of 25 × `MAX_CELL_ENTRIES`.
+pub fn check_installable(file: &rustline_pack::CheckedFile) -> Result<(), PackError> {
+    check_timezone(&file.meta.timezone)?;
+    street::check_disk_grid(&file.streets).map_err(PackError::Corrupt)
+}
+
 /// The entry point the app (and later the FFI layer) talks to.
 pub struct Engine {
     pack: Pack,
@@ -91,10 +110,7 @@ impl Engine {
     /// index would be too big, or a timezone that is not an IANA name, is
     /// [`PackError::Corrupt`].
     pub fn new(pack: Pack) -> Result<Engine, PackError> {
-        let name = &pack.meta().timezone;
-        let tz: chrono_tz::Tz = name.parse().map_err(|_| {
-            PackError::Corrupt(format!("timezone {name:?} is not an IANA timezone name"))
-        })?;
+        let tz = check_timezone(&pack.meta().timezone)?;
         let streets =
             street::Streets::new(pack.timetable(), LINK_MAX_M).map_err(PackError::Corrupt)?;
         Ok(Engine { pack, streets, tz })

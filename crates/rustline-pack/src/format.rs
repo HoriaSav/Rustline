@@ -6,6 +6,7 @@ use chrono::NaiveDate;
 use rkyv::rancor;
 use rkyv::util::AlignedVec;
 
+use crate::disk::DiskStreets;
 use crate::{PackError, TimetableData};
 
 /// First four bytes of every pack.
@@ -61,15 +62,7 @@ impl Pack {
     /// validity window) and wraps it with `meta`.
     pub fn new(meta: PackMeta, timetable: TimetableData) -> Result<Pack, PackError> {
         timetable.check().map_err(PackError::Corrupt)?;
-        if meta.valid_to < meta.valid_from {
-            return Err(corrupt("valid_to is before valid_from"));
-        }
-        let days = (meta.valid_to - meta.valid_from).num_days() + 1;
-        if i64::from(timetable.service_words) * 64 < days {
-            return Err(corrupt(
-                "service bitsets are shorter than the validity window",
-            ));
-        }
+        check_window(&meta, timetable.service_words)?;
         Ok(Pack { meta, timetable })
     }
 
@@ -201,7 +194,100 @@ fn read_from(input: impl Read, max_body_bytes: u64, zstd: bool) -> Result<Pack, 
     let mut r = CrcReader {
         inner: input,
         crc: crc32fast::Hasher::new(),
+        read: 0,
     };
+    let (meta, body_len) = read_header(&mut r, max_body_bytes, zstd)?;
+    // rkyv needs the body at an aligned address, so read it straight into an
+    // AlignedVec. It grows 1 MiB at a time as data arrives: the length in the
+    // header is untrusted, so a tiny file can't make us allocate it up front.
+    let mut body = AlignedVec::<16>::new();
+    let mut left = body_len;
+    while left > 0 {
+        let n = left.min(1 << 20);
+        let old = body.len();
+        body.resize(old + n, 0);
+        r.fill(&mut body.as_mut_slice()[old..])?;
+        left -= n;
+    }
+
+    read_trailer(&mut r)?;
+
+    let timetable = rkyv::from_bytes::<TimetableData, rancor::Error>(&body)
+        .map_err(|e| PackError::Corrupt(format!("body: {e}")))?;
+    Pack::new(meta, timetable)
+}
+
+/// Checks a plain `.rlp` stream without keeping it in memory: header, body
+/// length and CRC32, with the body read through one 1 MiB buffer (M7
+/// streaming install). Returns the header, where the body starts and its
+/// length. The body is not decoded here: see [`verify_pack_file`].
+pub(crate) fn verify_pack(
+    input: impl Read,
+    max_body_bytes: u64,
+) -> Result<(PackMeta, u64, usize), PackError> {
+    let mut r = CrcReader {
+        inner: input,
+        crc: crc32fast::Hasher::new(),
+        read: 0,
+    };
+    let (meta, body_len) = read_header(&mut r, max_body_bytes, false)?;
+    let start = r.read;
+    let mut left = body_len;
+    let mut buf = vec![0; 1 << 20];
+    while left > 0 {
+        let n = left.min(buf.len());
+        r.fill(&mut buf[..n])?;
+        left -= n;
+    }
+    read_trailer(&mut r)?;
+    Ok((meta, start, body_len))
+}
+
+/// A plain `.rlp` file that passed [`verify_pack_file`].
+pub struct CheckedFile {
+    /// The header.
+    pub meta: PackMeta,
+    /// The checked body, still on disk (for the street-grid rules).
+    pub streets: DiskStreets,
+}
+
+/// Checks a plain `.rlp` file the way [`read_pack`] does, without loading it
+/// (M7 streaming install): header, size and CRC32 in one pass, then the body
+/// on disk (rkyv layout and every `TimetableData::check` rule) through a small
+/// page cache, and the validity window. Memory stays at a few MiB. The file
+/// is opened once.
+pub fn verify_pack_file(
+    path: &std::path::Path,
+    max_body_bytes: u64,
+) -> Result<CheckedFile, PackError> {
+    let mut file = std::fs::File::open(path)?;
+    let (meta, start, len) = verify_pack(io::BufReader::new(&mut file), max_body_bytes)?;
+    // range: len ≤ max_body_bytes, a u64.
+    let (words, streets) = crate::disk::check_body(file, start, len as u64)?;
+    check_window(&meta, words)?;
+    Ok(CheckedFile { meta, streets })
+}
+
+/// The header's dates are in order and the service bitsets cover them.
+fn check_window(meta: &PackMeta, service_words: u32) -> Result<(), PackError> {
+    if meta.valid_to < meta.valid_from {
+        return Err(corrupt("valid_to is before valid_from"));
+    }
+    let days = (meta.valid_to - meta.valid_from).num_days() + 1;
+    if i64::from(service_words) * 64 < days {
+        return Err(corrupt(
+            "service bitsets are shorter than the validity window",
+        ));
+    }
+    Ok(())
+}
+
+/// The header fields and the body length (checked against the limit).
+fn read_header<R: Read>(
+    r: &mut CrcReader<R>,
+    max_body_bytes: u64,
+    zstd: bool,
+) -> Result<(PackMeta, usize), PackError> {
     let mut magic = [0; 4];
     if let Err(e) = r.read_exact(&mut magic) {
         // A short plain file is "not a pack"; a broken zstd stream is damage.
@@ -241,19 +327,11 @@ fn read_from(input: impl Read, max_body_bytes: u64, zstd: bool) -> Result<Pack, 
         )));
     }
     let body_len = usize::try_from(body_len).map_err(|_| corrupt("body too large"))?;
-    // rkyv needs the body at an aligned address, so read it straight into an
-    // AlignedVec. It grows 1 MiB at a time as data arrives: the length in the
-    // header is untrusted, so a tiny file can't make us allocate it up front.
-    let mut body = AlignedVec::<16>::new();
-    let mut left = body_len;
-    while left > 0 {
-        let n = left.min(1 << 20);
-        let old = body.len();
-        body.resize(old + n, 0);
-        r.fill(&mut body.as_mut_slice()[old..])?;
-        left -= n;
-    }
+    Ok((meta, body_len))
+}
 
+/// The stored CRC32 must match, and nothing may follow it.
+fn read_trailer<R: Read>(r: &mut CrcReader<R>) -> Result<(), PackError> {
     let expected = r.crc.clone().finalize();
     let mut stored = [0; 4];
     read_all(&mut r.inner, &mut stored)?;
@@ -264,9 +342,7 @@ fn read_from(input: impl Read, max_body_bytes: u64, zstd: bool) -> Result<Pack, 
         return Err(corrupt("extra bytes after the checksum"));
     }
 
-    let timetable = rkyv::from_bytes::<TimetableData, rancor::Error>(&body)
-        .map_err(|e| PackError::Corrupt(format!("body: {e}")))?;
-    Pack::new(meta, timetable)
+    Ok(())
 }
 
 /// `read_exact`, with a short file reported as `Corrupt`.
@@ -303,12 +379,16 @@ impl<W: Write> Write for CrcWriter<'_, W> {
 struct CrcReader<R: Read> {
     inner: R,
     crc: crc32fast::Hasher,
+    /// Bytes read so far (the header length, once it is read).
+    read: u64,
 }
 
 impl<R: Read> Read for CrcReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.crc.update(&buf[..n]);
+        // range: n ≤ buf.len(), a usize.
+        self.read += n as u64;
         Ok(n)
     }
 }

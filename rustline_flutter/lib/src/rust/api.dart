@@ -8,23 +8,34 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `core_request`, `count`, `days`, `fail`, `free_space`, `guard`, `install`, `io_error`, `itinerary`, `line`, `lock`, `ms`, `pack_error`, `pack_info`, `plan_error`, `quiet_panics`, `stop`, `warning`, `write_synced`
+// These functions are ignored because they are not marked as `pub`: `copy_and_check`, `core_request`, `count`, `days`, `fail`, `free_space`, `guard`, `header_info`, `injected_flock_error`, `install`, `io_error`, `is_own_tmp`, `itinerary`, `line`, `lock`, `ms`, `pack_error`, `pack_info`, `plan_error`, `quiet_panics`, `stop`, `warning`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
-// These functions are ignored (category: IgnoreBecauseExplicitAttribute): `install_pack_with_free_space`
+// These functions are ignored (category: IgnoreBecauseExplicitAttribute): `debug_flock_fail`, `install_pack_with_free_space`
 
 /// Installs a downloaded `.rlp.zst` at `dest`. Holds an exclusive lock on
 /// `{dest}.lock` for the whole install (a second install of the same `dest`
-/// waits), removes temp files a killed install left behind, decompresses and
-/// checks the pack in memory, checks the free space, writes its own
-/// `{name}.{pid}.{n}.tmp` (create_new), syncs it and renames it over `dest`.
-/// A bad download never touches an existing pack. The `.lock` file stays.
+/// waits), removes the temp files a killed install left behind (exactly
+/// `{name}.{pid}.{n}.tmp`), decompresses in 1 MiB chunks into its own
+/// `{name}.{pid}.{n}.tmp` (create_new) while checking the free space, syncs
+/// it, checks it from disk (header, size, CRC32 and the body: layout and every
+/// consistency rule `open` applies, plus the IANA timezone and the street-grid
+/// size, a few MiB at a time) and only then renames it over `dest`. A pack that
+/// fails is `pack_corrupt`. The pack is never held in memory (M7). A bad
+/// download never touches an existing pack. The `.lock` file stays. If `dest`
+/// is a symlink, the link itself is replaced by a regular file (its target is
+/// never written).
+///
+/// The returned info has the header fields only: the counts (stops … footpaths)
+/// are 0 and `street_graph` false, because the body is not loaded. Use
+/// `RustlineEngine.open(dest).info()` for them.
 Future<FfiPackInfo> installPack(
         {required String srcZst, required String dest}) =>
     RustLib.instance.api.crateApiInstallPack(srcZst: srcZst, dest: dest);
 
-/// Test hook: in debug builds a panic through the same guard as `plan` (so it
-/// comes back as `internal`); in profile/release builds it does nothing and
-/// returns `invalid_request`. Visible to Dart for the integration test.
+/// Test-only hook: in debug builds a panic through the same guard as `plan`
+/// (so it comes back as `internal`); in profile/release builds it does nothing
+/// and returns `invalid_request`. Visible to Dart for the integration test;
+/// apps must not call it.
 Future<void> debugInjectPanic() =>
     RustLib.instance.api.crateApiDebugInjectPanic();
 

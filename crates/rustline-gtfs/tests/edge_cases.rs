@@ -1,12 +1,13 @@
 //! Edge cases for GTFS ingest, each on a small feed written to a temp dir:
 //! time parsing, overtaking splits, interpolation, validation and timezone.
-//! Tests marked `#[ignore = "Known gap (M1) ..."]` (listed in the README) describe behaviour we want but don't have yet.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rustline_gtfs::{build_timetable, load, GtfsError, IssueKind, Timetable, ValidationReport};
+use rustline_gtfs::{
+    build_timetable, load, GtfsError, IssueKind, Severity, Timetable, ValidationReport,
+};
 use rustline_model::{Seconds, TripIdx};
 
 const AGENCY: &str = "agency_id,agency_name,agency_url,agency_timezone\nAG,Edge Transit,https://example.invalid/,Asia/Tokyo\n";
@@ -127,35 +128,34 @@ fn time_with_surrounding_spaces_is_accepted() {
     );
 }
 
-fn rejected(dep: &str) -> bool {
-    load(&one_trip(dep, "09:00:00").0).is_err()
+/// Lenient loading (Leader, M7): the feed loads, the row with the bad time is
+/// dropped as `InvalidTime`, and trip T (left with one stop time) is dropped.
+fn dropped(dep: &str) -> bool {
+    let (tt, report) = build(&one_trip(dep, "09:00:00"));
+    report.count(IssueKind::InvalidTime) == 1 && tt.trips.is_empty()
 }
 
 #[test]
-fn garbage_times_reject_the_feed() {
+fn garbage_times_drop_the_row() {
     for bad in ["-1", "ab:cd:ef", "08:00", "8h00m00", "08:0a:00"] {
-        assert!(rejected(bad), "{bad:?} should be rejected");
+        assert!(dropped(bad), "{bad:?} should be dropped");
     }
 }
 
 #[test]
-#[ignore = "Known gap (M1) #1, see README: ingest uses gtfs-structures' time parser, which has no range check; \
-            24:60:00 / 08:00:60 load as 25:00:00 / 08:01:00 (rustline_model::parse_gtfs_time is unused)"]
-fn out_of_range_minutes_or_seconds_reject_the_feed() {
+fn out_of_range_minutes_or_seconds_drop_the_row() {
     for bad in ["24:60:00", "08:00:60", "08:99:99"] {
-        assert!(rejected(bad), "{bad:?} should be rejected");
+        assert!(dropped(bad), "{bad:?} should be dropped");
     }
 }
 
 #[test]
-// Release builds have no overflow checks, so the parser wraps instead of panicking.
-#[cfg_attr(
-    not(debug_assertions),
-    ignore = "Known gap (M1) #2, see README: release builds have no overflow checks, so the parser wraps instead of panicking"
-)]
-fn overflowing_hours_reject_the_feed_without_panicking() {
-    let r = std::panic::catch_unwind(|| rejected("9999999:00:00"));
-    assert_eq!(r.ok(), Some(true));
+fn overflowing_hours_drop_the_row_without_panicking() {
+    // 48:00:00 is the first hour over the cap (Leader, M7); 9999999 used to overflow.
+    for bad in ["48:00:00", "9999999:00:00"] {
+        let r = std::panic::catch_unwind(|| dropped(bad));
+        assert_eq!(r.ok(), Some(true), "{bad}");
+    }
 }
 
 // ---- 5/6. patterns and overtaking ------------------------------------------
@@ -303,7 +303,7 @@ fn missing_required_file_is_a_hard_error() {
 }
 
 #[test]
-fn dangling_stop_id_in_stop_times_is_a_hard_error() {
+fn dangling_stop_id_in_stop_times_drops_the_trip() {
     let feed = TempFeed::new(&[
         ("trips.txt", &trips(&["T"])),
         (
@@ -314,7 +314,46 @@ fn dangling_stop_id_in_stop_times_is_a_hard_error() {
             ]),
         ),
     ]);
-    assert!(load(&feed.0).is_err());
+    // Lenient loading (Leader, M7): the trip goes, the feed stays.
+    let (tt, report) = build(&feed);
+    assert_eq!(report.count(IssueKind::UnknownStop), 1);
+    assert!(tt.trips.is_empty());
+}
+
+#[test]
+fn stop_time_of_a_trip_not_in_trips_txt_is_a_warning() {
+    // M7 (Leader decision 4): the row is dropped and reported, the feed stays.
+    let feed = TempFeed::new(&[
+        ("trips.txt", &trips(&["T"])),
+        (
+            "stop_times.txt",
+            &stop_times(&[
+                ("T", "08:00:00", "08:00:00", "A", 1),
+                ("T", "08:05:00", "08:05:00", "B", 2),
+                ("GHOST", "09:00:00", "09:00:00", "A", 1),
+            ]),
+        ),
+    ]);
+    let (tt, report) = build(&feed);
+    assert_eq!(report.count(IssueKind::UnknownTrip), 1);
+    assert_eq!(IssueKind::UnknownTrip.severity(), Severity::Warning);
+    assert_eq!(tt.trips.len(), 1);
+}
+
+#[test]
+fn a_trip_with_one_stop_time_is_a_warning() {
+    // M7 (Leader decision 2): the trip is dropped, as for an unknown stop.
+    let feed = TempFeed::new(&[
+        ("trips.txt", &trips(&["T"])),
+        (
+            "stop_times.txt",
+            &stop_times(&[("T", "08:00:00", "08:00:00", "A", 1)]),
+        ),
+    ]);
+    let (tt, report) = build(&feed);
+    assert_eq!(report.count(IssueKind::TooFewStopTimes), 1);
+    assert_eq!(IssueKind::TooFewStopTimes.severity(), Severity::Warning);
+    assert!(tt.trips.is_empty());
 }
 
 #[test]
@@ -326,8 +365,6 @@ fn decreasing_times_are_an_error() {
 }
 
 #[test]
-#[ignore = "Known gap (M1) #3, see README: duplicate trip_id rows in trips.txt are silently collapsed (parser HashMap); \
-            no report entry"]
 fn duplicate_trip_ids_are_reported() {
     let feed = TempFeed::new(&[
         ("trips.txt", "route_id,service_id,trip_id\nR,S,T\nR,S,T\n"),
@@ -339,17 +376,14 @@ fn duplicate_trip_ids_are_reported() {
             ]),
         ),
     ]);
-    let r = load(&feed.0).map(|f| build_timetable(&f).map(|(_, rep)| rep.is_clean()));
-    assert!(
-        !matches!(r, Ok(Ok(true))),
-        "duplicate ids must not pass silently"
-    );
+    let (tt, report) = build(&feed);
+    assert_eq!(report.count(IssueKind::DuplicateTripId), 1);
+    assert_eq!(tt.trips.len(), 1);
 }
 
 #[test]
 fn duplicate_stop_sequence_is_reported() {
-    // Today this surfaces only indirectly (as DecreasingTimes, depending on sort order);
-    // there is no dedicated issue kind. The trip must at least not pass silently.
+    // M7: its own warning, and the trip is dropped.
     let feed = TempFeed::new(&[
         ("trips.txt", &trips(&["T"])),
         (
@@ -362,7 +396,7 @@ fn duplicate_stop_sequence_is_reported() {
         ),
     ]);
     let (tt, report) = build(&feed);
-    assert!(!report.is_clean());
+    assert_eq!(report.count(IssueKind::DuplicateStopSequence), 1);
     assert!(tt.trips.is_empty());
 }
 
@@ -496,8 +530,6 @@ fn bom_crlf_quotes_and_extra_columns_load() {
 }
 
 #[test]
-#[ignore = "Known gap (M1) #5, see README: rows with fewer fields than the header (allowed in practice, e.g. Google's \
-            sample-feed-1) make the CSV reader fail the whole feed"]
 fn short_rows_load() {
     let st = "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type\nT,08:00:00,08:00:00,A,1,\nT,08:05:00,08:05:00,B,2\n";
     let feed = TempFeed::new(&[("trips.txt", &trips(&["T"])), ("stop_times.txt", st)]);

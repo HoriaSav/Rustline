@@ -77,46 +77,43 @@ fn frequency_expansion_over_the_cap_is_a_build_error() {
 }
 
 #[test]
-#[cfg_attr(
-    not(debug_assertions),
-    ignore = "Known gap (M1) #2, see README: release builds have no overflow checks, so the parser wraps instead of panicking"
-)]
 fn times_near_u32_max_build_or_fail_cleanly_and_never_panic() {
-    // 1193000:00:00 = 4 294 800 000 s fits in u32; 1193047:00:00 does not (u32::MAX is
-    // 1193046:28:15). Either a clean error or a pack whose queries do not overflow.
-    for (late, fits) in [("1193000:00:00", true), ("1193047:00:00", false)] {
+    // 1193000:00:00 fits in u32, 1193047:00:00 does not (u32::MAX is 1193046:28:15).
+    // Since M7 (Leader: hours below 48) both are an InvalidTime row in debug and
+    // release: trip W is dropped, the rest of the feed builds and routes.
+    for late in ["1193000:00:00", "1193047:00:00"] {
         let tf = Feed::daily(BUCHAREST, "20310101", "20310131")
             .trip("S", "W", &[("08:00:00", "A"), (late, "B")])
             .trip("S", "ok", &[("09:00:00", "A"), ("09:10:00", "C")])
             .write();
-        match tf.build() {
-            Err(e) => println!("{late}: build error: {e}"),
-            Ok((tt, _)) => {
-                assert!(fits, "{late} does not fit in u32 but was accepted");
-                let p = tf.pack();
-                let r = rides(&p, "A", "B", date(2031, 1, 15), hms(7, 0, 0)).unwrap();
-                println!("{late}: built, {} trips, A→B {:?}", tt.trips.len(), r);
-                assert_eq!(
-                    earliest(&p, "A", "C", date(2031, 1, 15), u32::MAX - 10),
-                    None
-                );
-                assert_eq!(
-                    earliest(&p, "A", "C", date(2031, 1, 15), hms(8, 0, 0)),
-                    Some(hms(9, 10, 0))
-                );
-            }
-        }
+        let (tt, report) = tf.build().expect("feed builds");
+        assert_eq!(
+            report.count(rustline_gtfs::IssueKind::InvalidTime),
+            1,
+            "{late}"
+        );
+        let ids: Vec<&str> = tt.trips.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["ok"], "{late}");
+        let p = tf.pack();
+        assert_eq!(
+            earliest(&p, "A", "C", date(2031, 1, 15), u32::MAX - 10),
+            None
+        );
+        assert_eq!(
+            earliest(&p, "A", "C", date(2031, 1, 15), hms(8, 0, 0)),
+            Some(hms(9, 10, 0))
+        );
     }
 }
 
 #[test]
 fn frequency_shift_past_u32_max_drops_the_row_with_a_warning() {
-    // Added by Builder (M5 review MF1). The template ends at 1193000:00:00 (fits in
-    // u32); a window starting at 1000000:00:00 would shift it past u32::MAX. The
-    // row is dropped with InvalidFrequency, the other row still expands.
+    // Added by Builder (M5 review MF1). The template ends at 47:00:00 (stop times stop
+    // below 48:00 since M7); a window starting at 1193040:00:00 would shift it past
+    // u32::MAX. The row is dropped with InvalidFrequency, the other row still expands.
     let tf = Feed::daily(BUCHAREST, "20310101", "20310131")
-        .trip("S", "F", &[("08:00:00", "A"), ("1193000:00:00", "B")])
-        .freq("F", "1000000:00:00", "1000001:00:00", "600", "1")
+        .trip("S", "F", &[("08:00:00", "A"), ("47:00:00", "B")])
+        .freq("F", "1193040:00:00", "1193041:00:00", "600", "1")
         .freq("F", "08:00:00", "08:20:00", "600", "1")
         .write();
     let (tt, report) = tf.build().expect("feed builds");
@@ -187,7 +184,8 @@ fn frequency_expansion_at_the_caps_stays_under_512_mib() {
 #[test]
 fn query_seconds_near_u32_max_do_not_panic() {
     let p = Feed::daily(BUCHAREST, "20310101", "20310131")
-        .trip("S", "t", &[("47:50:00", "A"), ("48:30:00", "B")])
+        // 47:10 → 47:50: stop times stop below 48:00 since M7 (was 47:50 → 48:30).
+        .trip("S", "t", &[("47:10:00", "A"), ("47:50:00", "B")])
         .pack();
     for dep in [
         hms(47, 0, 0),
@@ -201,6 +199,6 @@ fn query_seconds_near_u32_max_do_not_panic() {
     }
     assert_eq!(
         earliest(&p, "A", "B", date(2031, 1, 15), hms(47, 0, 0)),
-        Some(hms(48, 30, 0))
+        Some(hms(47, 50, 0))
     );
 }

@@ -22,7 +22,8 @@ pub enum Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueKind {
-    /// A trip with fewer than two stop times can't be ridden.
+    /// A trip with fewer than two stop times can't be ridden: it is dropped,
+    /// the feed is kept (warning since M7, Leader).
     TooFewStopTimes,
     /// Times go backwards along a trip.
     DecreasingTimes,
@@ -59,6 +60,22 @@ pub enum IssueKind {
     ConflictingCalendarDates,
     /// A calendar.txt row with `start_date` after `end_date`: no weekday runs.
     EmptyDateRange,
+    /// A stop_times.txt time that is not `H:MM:SS` with minutes and seconds
+    /// below 60 and hours below 48: the row is dropped (M7).
+    InvalidTime,
+    /// A trips.txt row whose `trip_id` was already seen: the first row wins (M7).
+    DuplicateTripId,
+    /// A trip with two stop times of the same `stop_sequence`: the trip is dropped (M7).
+    DuplicateStopSequence,
+    /// A row with fewer fields than the header (padded with empty values), or
+    /// without a required id or with a bad `stop_sequence` (dropped) (M7).
+    ShortRow,
+    /// A row longer than 64 KiB (or 4096 fields): dropped (M7).
+    RowTooLong,
+    /// A row with bytes that are not UTF-8: replaced by U+FFFD, row kept (M7).
+    InvalidUtf8,
+    /// A stop_times.txt row whose `trip_id` is not in trips.txt: dropped (M7).
+    UnknownTrip,
 }
 
 impl IssueKind {
@@ -67,9 +84,11 @@ impl IssueKind {
     pub fn severity(self) -> Severity {
         use IssueKind::*;
         match self {
-            TooFewStopTimes | DecreasingTimes | MissingBoundaryTime | UnknownService
-            | UnknownRoute | UnknownStop => Severity::Error,
-            InvalidFrequency
+            DecreasingTimes | MissingBoundaryTime | UnknownService | UnknownRoute | UnknownStop => {
+                Severity::Error
+            }
+            TooFewStopTimes
+            | InvalidFrequency
             | StopWithoutCoordinates
             | InterpolatedTimes
             | OvertakingSplit
@@ -79,7 +98,14 @@ impl IssueKind {
             | UnknownTransferStop
             | MissingMinTransferTime
             | ConflictingCalendarDates
-            | EmptyDateRange => Severity::Warning,
+            | EmptyDateRange
+            | InvalidTime
+            | DuplicateTripId
+            | DuplicateStopSequence
+            | ShortRow
+            | RowTooLong
+            | InvalidUtf8
+            | UnknownTrip => Severity::Warning,
         }
     }
 
@@ -112,6 +138,13 @@ impl IssueKind {
                 "services added and removed on the same day in calendar_dates.txt (not running)"
             }
             EmptyDateRange => "calendar.txt rows with start_date after end_date (never run)",
+            InvalidTime => "stop_times.txt rows with an invalid time (dropped)",
+            DuplicateTripId => "duplicate trip_id rows in trips.txt (first kept)",
+            DuplicateStopSequence => "trips with a repeated stop_sequence (dropped)",
+            ShortRow => "rows shorter than the header (padded) or without a required value (dropped)",
+            RowTooLong => "rows longer than 64 KiB (dropped)",
+            InvalidUtf8 => "rows with non-UTF-8 bytes (kept, bytes replaced)",
+            UnknownTrip => "stop_times.txt rows with a trip_id not in trips.txt (dropped)",
         }
     }
 }
@@ -175,7 +208,7 @@ impl fmt::Display for ValidationReport {
 }
 
 /// Collects issues while building; turned into a report at the end.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct ReportBuilder {
     issues: BTreeMap<IssueKind, Issue>,
 }

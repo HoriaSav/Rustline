@@ -36,6 +36,10 @@ const MAX_CELL_ENTRIES: u32 = 8_192;
 /// cell cap an honest pack cannot reach it (worst stop on two city packs:
 /// 2 854 entries within 100 m, 6 521 within 300 m).
 const MAX_SNAP_SCAN: usize = 25 * MAX_CELL_ENTRIES as usize;
+// `check_installable` relies on these (Reviewer MF1): a stop's link window is
+// at most one cell wide, so it spans at most 3 × 3 cells, under the budget.
+const _: () = assert!(2.0 * crate::LINK_MAX_M <= CELL_M);
+const _: () = assert!(9 * MAX_CELL_ENTRIES as usize <= MAX_SNAP_SCAN);
 
 /// Great-circle distance in metres.
 pub(crate) fn haversine_m(a: LatLon, b: LatLon) -> f64 {
@@ -89,12 +93,7 @@ pub(crate) struct Streets {
     inc: Vec<(u32, bool)>,
     /// Grid of segment pieces (segment, piece index): cell (x, y) is
     /// `cells[cell_start[y * nx + x]..]`.
-    lat0: f64,
-    lon0: f64,
-    dlat: f64,
-    dlon: f64,
-    nx: usize,
-    ny: usize,
+    grid: Grid,
     cell_start: Vec<u32>,
     cells: Vec<(u32, u32)>,
     /// Snap of each stop within the link distance (`None`: not linked).
@@ -165,12 +164,7 @@ impl Streets {
             out: Vec::new(),
             in_start: Vec::new(),
             inc: Vec::new(),
-            lat0: 0.0,
-            lon0: 0.0,
-            dlat: 1.0,
-            dlon: 1.0,
-            nx: 0,
-            ny: 0,
+            grid: Grid::for_box([0.0; 4]),
             cell_start: Vec::new(),
             cells: Vec::new(),
             stop_snap: Vec::new(),
@@ -272,52 +266,18 @@ impl Streets {
             lo_lon = lo_lon.min(p.lon);
             hi_lon = hi_lon.max(p.lon);
         }
-        let k = ((lo_lat.abs().max(hi_lat.abs())).min(89.0))
-            .to_radians()
-            .cos();
-        let mut cell = CELL_M;
-        // Keep the grid at most MAX_GRID_CELLS cells, whatever the extent.
-        loop {
-            self.dlat = (cell / EARTH_RADIUS_M).to_degrees();
-            self.dlon = self.dlat / k;
-            self.nx = ((hi_lon - lo_lon) / self.dlon) as usize + 1;
-            self.ny = ((hi_lat - lo_lat) / self.dlat) as usize + 1;
-            if self.nx.saturating_mul(self.ny) <= MAX_GRID_CELLS {
-                break;
-            }
-            cell *= 2.0;
-        }
-        self.lat0 = lo_lat;
-        self.lon0 = lo_lon;
-        let pieces = self.shape.len() + self.seg_a.len();
-        let cap = (MAX_GRID_ENTRIES_PER_PIECE * pieces).max(4096);
-        // Two passes (count, then fill) so the grid is one flat CSR array.
-        let cells = self.nx * self.ny;
-        let mut count = vec![0u32; cells + 1];
-        let mut total = 0usize;
-        for g in 0..self.seg_a.len() as u32 {
+        self.grid = Grid::for_box([lo_lat, hi_lat, lo_lon, hi_lon]);
+        let mut counter = Counter::new(&self.grid, self.shape.len() + self.seg_a.len());
+        'all: for g in 0..self.seg_a.len() as u32 {
             for i in 0..self.piece_count(g) {
                 let (a, b) = self.piece(g, i);
-                let mut over = false;
-                self.cells_on_line(a, b, |c| {
-                    total += 1;
-                    over |= total > cap;
-                    if !over {
-                        count[c + 1] += 1;
-                    }
-                });
-                if over {
-                    return Err(format!(
-                        "street grid needs more than {cap} entries ({MAX_GRID_ENTRIES_PER_PIECE} per segment piece)"
-                    ));
+                if !counter.add(a, b) {
+                    break 'all;
                 }
             }
         }
-        if let Some(n) = count.iter().copied().find(|&n| n > MAX_CELL_ENTRIES) {
-            return Err(format!(
-                "street grid cell has {n} entries (more than {MAX_CELL_ENTRIES}): streets piled up in one spot"
-            ));
-        }
+        let (mut count, total) = counter.finish()?;
+        let cells = self.grid.nx * self.grid.ny;
         for c in 0..cells {
             count[c + 1] += count[c];
         }
@@ -326,7 +286,7 @@ impl Streets {
         for g in 0..self.seg_a.len() as u32 {
             for i in 0..self.piece_count(g) {
                 let (a, b) = self.piece(g, i);
-                self.cells_on_line(a, b, |c| {
+                self.grid.cells_on_line(a, b, |c| {
                     entries[fill[c] as usize] = (g, i);
                     fill[c] += 1;
                 });
@@ -359,48 +319,6 @@ impl Streets {
         (at(i), at(i + 1))
     }
 
-    /// Calls `f` with every grid cell the straight line a–b passes through
-    /// (a grid walk in cell units; a line through a corner also gets one of
-    /// the two side cells, which is harmless).
-    fn cells_on_line(&self, a: LatLon, b: LatLon, mut f: impl FnMut(usize)) {
-        let u = |p: LatLon| (p.lon - self.lon0) / self.dlon;
-        let v = |p: LatLon| (p.lat - self.lat0) / self.dlat;
-        let (u0, v0, u1, v1) = (u(a), v(a), u(b), v(b));
-        let (xa, ya) = self.cell_of(a);
-        let (xb, yb) = self.cell_of(b);
-        let (mut x, mut y) = (xa, ya);
-        let (du, dv) = (u1 - u0, v1 - v0);
-        let next = |c: usize, d: f64, p0: f64| {
-            if d > 0.0 {
-                ((c + 1) as f64 - p0) / d
-            } else if d < 0.0 {
-                (c as f64 - p0) / d
-            } else {
-                f64::INFINITY
-            }
-        };
-        let (mut tx, mut ty) = (next(x, du, u0), next(y, dv, v0));
-        let (sx, sy) = (1.0 / du.abs(), 1.0 / dv.abs());
-        // At most one step per cell boundary crossed: the walk always ends.
-        for _ in 0..xa.abs_diff(xb) + ya.abs_diff(yb) {
-            f(y * self.nx + x);
-            if (tx < ty && x != xb) || y == yb {
-                x = if xb > x { x + 1 } else { x - 1 };
-                tx += sx;
-            } else {
-                y = if yb > y { y + 1 } else { y - 1 };
-                ty += sy;
-            }
-        }
-        f(yb * self.nx + xb);
-    }
-
-    fn cell_of(&self, p: LatLon) -> (usize, usize) {
-        let x = ((p.lon - self.lon0) / self.dlon).max(0.0) as usize;
-        let y = ((p.lat - self.lat0) / self.dlat).max(0.0) as usize;
-        (x.min(self.nx - 1), y.min(self.ny - 1))
-    }
-
     /// The nearest street point within `max_m` (inclusive). Ties go to the
     /// lower segment index, so the answer is always the same.
     /// A snap that would scan more than `MAX_SNAP_SCAN` grid entries is
@@ -426,16 +344,16 @@ impl Streets {
         }
         let r_lat = (max_m / EARTH_RADIUS_M).to_degrees();
         let r_lon = r_lat / p.lat.to_radians().cos().max(1e-6);
-        let fx = |lon: f64| ((lon - self.lon0) / self.dlon).floor();
-        let fy = |lat: f64| ((lat - self.lat0) / self.dlat).floor();
+        let fx = |lon: f64| ((lon - self.grid.lon0) / self.grid.dlon).floor();
+        let fy = |lat: f64| ((lat - self.grid.lat0) / self.grid.dlat).floor();
         let (x0, x1) = (fx(p.lon - r_lon).max(0.0), fx(p.lon + r_lon));
         let (y0, y1) = (fy(p.lat - r_lat).max(0.0), fy(p.lat + r_lat));
-        if x1 < 0.0 || y1 < 0.0 || x0 >= self.nx as f64 || y0 >= self.ny as f64 {
+        if x1 < 0.0 || y1 < 0.0 || x0 >= self.grid.nx as f64 || y0 >= self.grid.ny as f64 {
             return Ok(None);
         }
         let (x0, y0) = (x0 as usize, y0 as usize);
-        let x1 = (x1 as usize).min(self.nx - 1);
-        let y1 = (y1 as usize).min(self.ny - 1);
+        let x1 = (x1 as usize).min(self.grid.nx - 1);
+        let y1 = (y1 as usize).min(self.grid.ny - 1);
         let mut best: Option<(f64, u32, u32, f64, LatLon)> = None;
         let k = p.lat.to_radians().cos();
         let xy = |q: LatLon| {
@@ -445,7 +363,7 @@ impl Streets {
             )
         };
         let rows = (y0..=y1).map(|y| {
-            let c = y * self.nx;
+            let c = y * self.grid.nx;
             self.cell_start[c + x0] as usize..self.cell_start[c + x1 + 1] as usize
         });
         // Saturating: a tampered cell_start cannot wrap the count below the budget.
@@ -787,6 +705,159 @@ impl Streets {
         }
         v
     }
+}
+
+/// The snapping grid's place and size. One rule for [`Streets::new`] and for
+/// install ([`check_street_grid`]): 200 m cells, grown until the grid has at
+/// most [`MAX_GRID_CELLS`] cells.
+pub(crate) struct Grid {
+    lat0: f64,
+    lon0: f64,
+    dlat: f64,
+    dlon: f64,
+    nx: usize,
+    ny: usize,
+}
+
+impl Grid {
+    /// The grid over `[lo_lat, hi_lat, lo_lon, hi_lon]` (degrees).
+    pub(crate) fn for_box([lo_lat, hi_lat, lo_lon, hi_lon]: [f64; 4]) -> Grid {
+        let k = ((lo_lat.abs().max(hi_lat.abs())).min(89.0))
+            .to_radians()
+            .cos();
+        let mut cell = CELL_M;
+        // Keep the grid at most MAX_GRID_CELLS cells, whatever the extent.
+        loop {
+            let dlat = (cell / EARTH_RADIUS_M).to_degrees();
+            let dlon = dlat / k;
+            // range: both spans are ≥ 0 and finite (coordinates are checked), the casts saturate.
+            let nx = ((hi_lon - lo_lon) / dlon) as usize + 1;
+            let ny = ((hi_lat - lo_lat) / dlat) as usize + 1;
+            if nx.saturating_mul(ny) <= MAX_GRID_CELLS {
+                return Grid {
+                    lat0: lo_lat,
+                    lon0: lo_lon,
+                    dlat,
+                    dlon,
+                    nx,
+                    ny,
+                };
+            }
+            cell *= 2.0;
+        }
+    }
+
+    /// Calls `f` with every grid cell the straight line a–b passes through
+    /// (a grid walk in cell units; a line through a corner also gets one of
+    /// the two side cells, which is harmless).
+    fn cells_on_line(&self, a: LatLon, b: LatLon, mut f: impl FnMut(usize)) {
+        let u = |p: LatLon| (p.lon - self.lon0) / self.dlon;
+        let v = |p: LatLon| (p.lat - self.lat0) / self.dlat;
+        let (u0, v0, u1, v1) = (u(a), v(a), u(b), v(b));
+        let (xa, ya) = self.cell_of(a);
+        let (xb, yb) = self.cell_of(b);
+        let (mut x, mut y) = (xa, ya);
+        let (du, dv) = (u1 - u0, v1 - v0);
+        let next = |c: usize, d: f64, p0: f64| {
+            if d > 0.0 {
+                ((c + 1) as f64 - p0) / d
+            } else if d < 0.0 {
+                (c as f64 - p0) / d
+            } else {
+                f64::INFINITY
+            }
+        };
+        let (mut tx, mut ty) = (next(x, du, u0), next(y, dv, v0));
+        let (sx, sy) = (1.0 / du.abs(), 1.0 / dv.abs());
+        // At most one step per cell boundary crossed: the walk always ends.
+        for _ in 0..xa.abs_diff(xb) + ya.abs_diff(yb) {
+            f(y * self.nx + x);
+            if (tx < ty && x != xb) || y == yb {
+                x = if xb > x { x + 1 } else { x - 1 };
+                tx += sx;
+            } else {
+                y = if yb > y { y + 1 } else { y - 1 };
+                ty += sy;
+            }
+        }
+        f(yb * self.nx + xb);
+    }
+
+    fn cell_of(&self, p: LatLon) -> (usize, usize) {
+        let x = ((p.lon - self.lon0) / self.dlon).max(0.0) as usize;
+        let y = ((p.lat - self.lat0) / self.dlat).max(0.0) as usize;
+        (x.min(self.nx - 1), y.min(self.ny - 1))
+    }
+}
+
+/// Counts grid entries cell by cell, piece after piece, and applies the size
+/// rules: at most [`MAX_GRID_ENTRIES_PER_PIECE`] per piece on average (at
+/// least 4096 in all) and [`MAX_CELL_ENTRIES`] per cell.
+pub(crate) struct Counter<'g> {
+    grid: &'g Grid,
+    cap: usize,
+    total: usize,
+    count: Vec<u32>,
+    over: bool,
+}
+
+impl<'g> Counter<'g> {
+    /// A counter for `pieces` segment pieces on `grid`.
+    pub(crate) fn new(grid: &'g Grid, pieces: usize) -> Counter<'g> {
+        Counter {
+            grid,
+            cap: (MAX_GRID_ENTRIES_PER_PIECE * pieces).max(4096),
+            total: 0,
+            count: vec![0u32; grid.nx * grid.ny + 1],
+            over: false,
+        }
+    }
+
+    /// Adds the piece a–b; false once the entry cap is passed (stop then).
+    pub(crate) fn add(&mut self, a: LatLon, b: LatLon) -> bool {
+        let (total, cap, over, count) =
+            (&mut self.total, self.cap, &mut self.over, &mut self.count);
+        self.grid.cells_on_line(a, b, |c| {
+            *total += 1;
+            *over |= *total > cap;
+            if !*over {
+                count[c + 1] += 1;
+            }
+        });
+        !self.over
+    }
+
+    /// The per-cell counts (cell c at c + 1) and the total, or why the grid is too big.
+    pub(crate) fn finish(self) -> Result<(Vec<u32>, usize), String> {
+        if self.over {
+            return Err(format!(
+                "street grid needs more than {} entries ({MAX_GRID_ENTRIES_PER_PIECE} per segment piece)",
+                self.cap
+            ));
+        }
+        if let Some(n) = self.count.iter().copied().find(|&n| n > MAX_CELL_ENTRIES) {
+            return Err(format!(
+                "street grid cell has {n} entries (more than {MAX_CELL_ENTRIES}): streets piled up in one spot"
+            ));
+        }
+        Ok((self.count, self.total))
+    }
+}
+
+/// The street-grid rules of [`Streets::new`] for a pack checked on disk: the
+/// same box, grid and counts, read through the disk page cache.
+pub(crate) fn check_disk_grid(s: &rustline_pack::DiskStreets) -> Result<(), String> {
+    if s.segments() == 0 {
+        return Ok(());
+    }
+    let b = s.bbox_e7().map_err(|e| e.to_string())?;
+    // e7 is increasing, so the min/max of e7 values is e7 of the min/max.
+    let grid = Grid::for_box([e7(b[0]), e7(b[1]), e7(b[2]), e7(b[3])]);
+    let mut counter = Counter::new(&grid, s.pieces());
+    let pt = |(lat, lon): (i32, i32)| LatLon::new(e7(lat), e7(lon));
+    s.each_piece(|a, b| counter.add(pt(a), pt(b)))
+        .map_err(|e| e.to_string())?;
+    counter.finish().map(|_| ())
 }
 
 /// Lists → (CSR start, items).

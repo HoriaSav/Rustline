@@ -281,7 +281,7 @@ fn query_offset_other_than_the_feed_zone_answers_in_the_feed_zone() {
 /// January 2031. N1 only on Fri 2031-01-10: A 24:10, B 24:30, C 24:50. N2 daily:
 /// A 23:50, B 24:10, C 24:30. M daily: A 12:00, B 12:20, C 12:40. E24 (Fri only)
 /// A 24:00:00 → D 24:10; E0 daily A 00:00:00 → D 00:10. L on Sat 2031-01-11 only:
-/// A 47:50 → F 48:30.
+/// A 47:10 → F 47:50 (times stop below 48:00, the M7 hour cap).
 fn uc4_feed(tz: &str, with_n2: bool) -> Feed {
     let mut f = Feed::daily(tz, "20310101", "20310131")
         .service("FRI", "0000000", "20310101", "20310131")
@@ -300,7 +300,7 @@ fn uc4_feed(tz: &str, with_n2: bool) -> Feed {
         )
         .trip("FRI", "E24", &[("24:00:00", "A"), ("24:10:00", "D")])
         .trip("S", "E0", &[("00:00:00", "A"), ("00:10:00", "D")])
-        .trip("SAT", "L", &[("47:50:00", "A"), ("48:30:00", "F")]);
+        .trip("SAT", "L", &[("47:10:00", "A"), ("47:50:00", "F")]);
     if with_n2 {
         f = f.trip(
             "S",
@@ -409,16 +409,17 @@ fn exact_midnight_and_one_second_before() {
 }
 
 #[test]
-fn trip_at_or_after_48_00() {
-    // L on Saturday 2031-01-11 at 47:50 = Sunday 23:50, arriving 48:30 = Monday 00:30.
+fn trip_just_under_the_48_00_cap() {
+    // L on Saturday 2031-01-11 at 47:10 = Sunday 23:10, arriving 47:50 = Sunday 23:50.
+    // (Was 47:50 → 48:30; 48:00:00 and later is an InvalidTime row since M7, Leader.)
     let e = engine(uc4_feed(BUCHAREST, false).pack());
     let it = first(
         &plan_stops(&e, "A", "F", at(2031, 1, 12, 23, 0, 0, 2)),
         BUCHAREST,
     );
     assert_eq!(it.trips(), ["L"], "{it:?}");
-    assert!(same(board(&it), at(2031, 1, 12, 23, 50, 0, 2)));
-    assert!(same(it.arr, at(2031, 1, 13, 0, 30, 0, 2)));
+    assert!(same(board(&it), at(2031, 1, 12, 23, 10, 0, 2)));
+    assert!(same(it.arr, at(2031, 1, 12, 23, 50, 0, 2)));
 }
 
 // ---- validity window ---------------------------------------------------------------

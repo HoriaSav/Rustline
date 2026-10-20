@@ -120,7 +120,8 @@ fn broken_feed_report() {
     }
     // 5 since M5: InvalidFrequency (the headway-0 row) is a warning now (Tester M5
     // final check item 4; changed by Builder), so it is no longer in `errors`.
-    assert_eq!(report.errors.len(), 5);
+    // 4 since M7: TooFewStopTimes is a warning too (Leader decision 2, Builder).
+    assert_eq!(report.errors.len(), 4);
 }
 
 #[test]

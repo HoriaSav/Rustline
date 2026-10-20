@@ -1,12 +1,15 @@
-//! Reading the feed with the `gtfs-structures` crate.
+//! Reading the feed: `gtfs-structures` for most files, Rustline's own lenient
+//! reader for trips.txt and stop_times.txt (M7).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::io::Read;
 use std::path::Path;
 
 use gtfs_structures::{Gtfs, GtfsReader, LocationType};
 use serde::Serialize;
 
-use crate::GtfsError;
+use crate::report::ReportBuilder;
+use crate::{reader, GtfsError, IssueKind};
 
 /// The feed exactly as the parser read it, before normalisation.
 ///
@@ -18,18 +21,70 @@ pub struct RawFeed {
     /// because the parser fails the whole feed on one unknown
     /// `transfer_type` and drops the trip/route columns.
     pub(crate) transfers: Option<String>,
+    /// Rows dropped or padded while reading trips.txt and stop_times.txt (M7).
+    pub(crate) issues: ReportBuilder,
 }
 
 /// Loads a GTFS feed from a `.zip` file or an unpacked directory.
+///
+/// A missing file or required column fails the feed; a bad row in trips.txt
+/// or stop_times.txt is dropped (or padded) and reported (M7).
 pub fn load(path: &Path) -> Result<RawFeed, GtfsError> {
-    // gtfs-structures can panic on bad values (e.g. huge hours), so turn that
-    // into an error instead of crashing the caller.
-    let read = || {
-        let mut raw = GtfsReader::default().raw().read_from_path(path)?;
-        raw.transfers = None;
-        Gtfs::try_from(raw)
+    let mut raw = no_panic(path, || {
+        GtfsReader::default()
+            .read_stop_times(false)
+            .raw()
+            .read_from_path(path)
+    })?
+    .map_err(|source| GtfsError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    raw.transfers = None;
+
+    let mut issues = ReportBuilder::default();
+    let trips = member(path, "trips.txt", |r| reader::trips(r, &mut issues))?;
+    let stops: HashSet<&str> = match &raw.stops {
+        Ok(s) => s.iter().map(|s| s.id.as_str()).collect(),
+        Err(_) => HashSet::new(),
     };
-    let result = std::panic::catch_unwind(read).map_err(|payload| {
+    let ids: HashSet<String> = trips.iter().map(|t| t.id.clone()).collect();
+    let (stop_times, unknown_stop) = member(path, "stop_times.txt", |r| {
+        reader::stop_times(r, &ids, &stops, &mut issues)
+    })?;
+    // A trip naming an unknown stop is dropped as a whole (sorted: same report every run).
+    let mut unknown: Vec<&String> = unknown_stop.iter().collect();
+    unknown.sort();
+    for t in unknown {
+        issues.add(IssueKind::UnknownStop, 1, t.as_str());
+    }
+    let keep = |id: &str| ids.contains(id) && !unknown_stop.contains(id);
+    let stop_times = stop_times
+        .into_iter()
+        .filter(|s| keep(&s.trip_id))
+        .collect();
+    if let Some(Ok(f)) = &mut raw.frequencies {
+        f.retain(|f| keep(&f.trip_id));
+    }
+    let trips = trips.into_iter().filter(|t| keep(&t.id)).collect();
+    raw.trips = Ok(trips);
+    raw.stop_times = Ok(stop_times);
+
+    let gtfs = no_panic(path, || Gtfs::try_from(raw))?.map_err(|source| GtfsError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    let transfers = transfers_text(path).map_err(|e| GtfsError::Transfers(e.to_string()))?;
+    Ok(RawFeed {
+        gtfs,
+        transfers,
+        issues,
+    })
+}
+
+/// Runs the parser; a panic in it becomes an error instead of crashing the caller.
+fn no_panic<T>(path: &Path, f: impl FnOnce() -> T) -> Result<T, GtfsError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
         // A panic payload is usually a &str or a String; keep its text.
         let message = if let Some(s) = payload.downcast_ref::<&str>() {
             s.to_string()
@@ -42,13 +97,43 @@ pub fn load(path: &Path) -> Result<RawFeed, GtfsError> {
             path: path.to_owned(),
             message,
         }
-    })?;
-    let gtfs = result.map_err(|source| GtfsError::Read {
+    })
+}
+
+/// Runs `f` on file `name` of a feed directory or zip (in a zip it may sit in
+/// a folder, as the parser allows). A missing file is an error.
+fn member<T>(
+    path: &Path,
+    name: &'static str,
+    f: impl FnOnce(&mut dyn Read) -> Result<T, GtfsError>,
+) -> Result<T, GtfsError> {
+    let bad = |e: &dyn std::fmt::Display| GtfsError::Csv {
+        file: name,
+        message: e.to_string(),
+    };
+    let missing = || GtfsError::Read {
         path: path.to_owned(),
-        source,
-    })?;
-    let transfers = transfers_text(path).map_err(|e| GtfsError::Transfers(e.to_string()))?;
-    Ok(RawFeed { gtfs, transfers })
+        source: gtfs_structures::Error::MissingFile(name.to_string()),
+    };
+    if path.is_dir() {
+        let p = path.join(name);
+        if !p.is_file() {
+            return Err(missing());
+        }
+        return f(&mut std::fs::File::open(p).map_err(|e| bad(&e))?);
+    }
+    let file = std::fs::File::open(path).map_err(|e| bad(&e))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| bad(&e))?;
+    let found = (0..zip.len()).find_map(|i| {
+        let f = zip.by_index(i).ok()?;
+        let n = f.name().to_string();
+        (Path::new(&n).file_name() == Some(std::ffi::OsStr::new(name))).then_some(n)
+    });
+    let Some(found) = found else {
+        return Err(missing());
+    };
+    let mut entry = zip.by_name(&found).map_err(|e| bad(&e))?;
+    f(&mut entry)
 }
 
 /// The text of transfers.txt in a feed directory or zip (`None`: no such file).

@@ -165,6 +165,7 @@ sequenceDiagram
 
 ### 7.2 GTFS ingest (`rustline-gtfs`)
 - Parse with the `gtfs-structures` crate (used by both `raptor` and `vulture` crates) [docs.rs](https://docs.rs/gtfs-structures). Alternative: own `csv` + `serde` reader if we need streaming/low memory.
+  - Since M7: trips.txt and stop_times.txt are read by Rustline's own lenient streaming reader (`csv-core`, rows ≤ 64 KiB, columns by header name; hours < 48). A bad row is dropped or padded with a warning (`InvalidTime`, `DuplicateTripId`, `DuplicateStopSequence`, `ShortRow`, `RowTooLong`, `InvalidUtf8`); a missing file or required column fails the feed. The other files still go through `gtfs-structures`.
 - Validate: missing stop times, non-increasing times, unknown service ids, trips overtaking each other on the same pattern (RAPTOR requires no overtaking; split such patterns).
 - Normalise: times as **seconds since service-day noon minus 12h** (GTFS definition, see §10) stored as `u32`, allowing >24:00.
 - Build **stop patterns** (group trips by identical stop sequence), sort trips in each pattern by departure.
@@ -307,7 +308,7 @@ final now = DateTime.now();
 final res = await engine.plan(req: FfiPlanRequest(fromLat: 45.64, fromLon: 25.59, toLat: 45.66, toLon: 25.61,
     departAtMs: now.millisecondsSinceEpoch, departOffsetSecs: now.timeZoneOffset.inSeconds, maxResults: 5));
 final info = await engine.info();                            // FfiPackInfo, dates as days since 1970-01-01
-await installPack(srcZst: downloaded, dest: packPath);       // {dest}.lock, free-space check, own .tmp + fsync + rename
+await installPack(srcZst: downloaded, dest: packPath);       // {dest}.lock, streamed into own .tmp (free space checked), fsync, header, CRC and body checked from disk (layout, check() rules, IANA tz, street grid), rename
 ```
 (M6, `crates/rustline-ffi/src/api.rs`, plugin `rustline_flutter`.) Types are plain data (`FfiPlanRequest`, `FfiPlanResponse`, `FfiItinerary`, `FfiLeg` = `Walk | Transit`, `FfiStop`, `FfiPackInfo`); every time crosses as epoch milliseconds + offset seconds and the answer is in the feed's offset. Optional request fields: `maxAccessM`, `walkSpeedMps`, `maxTransfers`. Calls run on a Rust thread (FRB async), never blocking the UI. Every function returns `Result`; errors arrive as a typed Dart `RustlineException` with a stable `code`: `invalid_request`, `outside_coverage`, `no_route`, `date_outside_feed`, `pack_corrupt`, `pack_version`, `pack_missing`, `pack_io`, `pack_too_large`, `no_space`, `internal` (a panic, caught in Rust; the app keeps running). `RustlinePlanner` (Dart) is latest-wins: a superseded query resolves to null; a single Rust call is bounded (≤ 1 s, measured worst 2.7 ms on the PC for 200 random Brașov queries).
 
@@ -357,6 +358,7 @@ Measured in M6 (2026-10-20). Phone (A54) numbers are left for Savin.
 | Measurement | Value |
 |---|---|
 | `librustline_ffi.so`, release + LTO, stripped (llvm-strip from NDK 26.1) | arm64-v8a **2.77 MiB** (2 903 936 B); x86_64 **2.91 MiB** (3 048 288 B) |
+| Same, M7 (streaming install with the on-disk body check; FRB features trimmed) | arm64-v8a **2.79 MiB** (2 926 744 B); x86_64 **2.93 MiB** (3 076 120 B) |
 | Example APK (`flutter build apk --release --target-platform android-arm64,android-x64`) | 14.6 MB |
 | Host stand-in, not emulator: `rustline_perf_test.dart` on `flutter-tester` (Linux PC above, Dart debug VM, Rust release library), Brașov pack with streets, 100 fixed queries | p50 0.93 ms, p95 2.52 ms, max 5.96 ms; pack open median 31.7 ms |
 | **Emulator** (x86_64, android-34 google_apis, KVM, on the PC above): `flutter drive --profile` of `rustline_perf_test.dart`, Brașov pack with streets, 100 fixed queries (52 with a route) | p50 **0.79 ms**, p95 **2.65 ms**, max 5.41 ms; pack open median **49.1 ms** |
@@ -400,9 +402,14 @@ GTFS‑RT TripUpdates (delays) would be applied as a per-trip delay overlay with
 | M4 | Streets | OSM ingest, snapping, Dijkstra, footpaths, access/egress, walk-only | Door-to-door golden tests (incl. "walk is better") pass; all stops linked or reported |
 | M5 | Calendar & edge cases | after-midnight, DST, holidays, frequencies, transfers.txt | Dedicated tests for each pass; benchmarks meet §12 on PC |
 | M6 | Flutter integration | FRB plugin, Android build, planner screen prototype | Plan query runs on your Samsung A54 offline; p95 measured |
-| M7 | Server (optional) | axum `/v1/plan`, Docker image | JSON schema test; same results as library |
-| M8 | Quality+ | McRAPTOR walking criterion, arrive-by, range queries | Golden tests updated; thesis-ready docs and benchmark charts |
-| M9 | Future | Pack served by backend_v2, realtime overlay, multi-city | Separate spec |
+| M7 | Cleanup | Own lenient stop_times/trips reader, M6 review leftovers | Known gaps #1–3, #5, #6 closed; sample feed builds |
+| M8 | Arrive-by | `TimeSpec::ArriveBy`, reverse RAPTOR, depart-late pass | Oracle agrees on random queries |
+| M9 | rRAPTOR options | Pareto (arrival, transfers), range queries | Dominance property test; perf budget met |
+| M10 | GitHub CI | fmt, clippy, tests debug+release, Flutter, Android | CI green on PRs |
+| M11 | iOS build | xcframework, Cargokit iOS, macOS runners | iOS simulator integration test green |
+| M12 | Server (optional, not now) | axum `/v1/plan`, Docker image | JSON schema test; same results as library |
+| M13 | RoTransit integration (not now) | Planner screen, freshness banner, attribution | Plan query runs in RoTransit on the A54 offline |
+| M14 | Future | Backend packs, realtime, multi-city, McRAPTOR walking, thesis charts | Separate spec |
 
 ```mermaid
 gantt
@@ -424,7 +431,7 @@ gantt
 | Pack too big / slow on phone | Bad UX | Measure in M2/M4; contract street graph; drop geometry, compute it server side |
 | Overtaking trips break RAPTOR | Wrong results | Split patterns at build time |
 | OSM gaps (missing footways) | Detours or no route | Fallback straight-line ×1.3; report unlinked stops |
-| Scope creep (bikes, realtime, multi-city) | Thesis late | Non-goals list; M8+ only after M6 |
+| Scope creep (bikes, realtime, multi-city) | Thesis late | Non-goals list; M12+ only after M11 |
 | Learning Rust while building | Slower | Small milestones; reference crates `raptor`/`vulture` to compare |
 
 ## 19. Open questions for Horia

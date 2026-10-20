@@ -278,298 +278,429 @@ impl TimetableData {
     /// Checks that all arrays fit together, so later indexing can't go out
     /// of bounds. Returns what is wrong as text.
     pub fn check(&self) -> Result<(), String> {
-        let stops = self.stop_ids.len();
-        let trips = self.trip_ids.len();
-        let patterns = self.pattern_count();
-        let same = |name: &str, len: usize, want: usize| {
-            if len == want {
-                Ok(())
-            } else {
-                Err(format!("{name} has {len} entries, expected {want}"))
-            }
-        };
-        same("stop_names", self.stop_names.len(), stops)?;
-        same("stop_lat", self.stop_lat.len(), stops)?;
-        same("stop_lon", self.stop_lon.len(), stops)?;
-        same("stop_kind", self.stop_kind.len(), stops)?;
-        same("stop_parent", self.stop_parent.len(), stops)?;
-        let routes = self.route_ids.len();
-        same("route_short_names", self.route_short_names.len(), routes)?;
-        same("route_long_names", self.route_long_names.len(), routes)?;
-        same("route_types", self.route_types.len(), routes)?;
-        same("trip_route", self.trip_route.len(), trips)?;
-        same("trip_service", self.trip_service.len(), trips)?;
-        same("trip_headsigns", self.trip_headsigns.len(), trips)?;
-        same("trip_approximate", self.trip_approximate.len(), trips)?;
-        same("trip_pattern", self.trip_pattern.len(), trips)?;
-        same("trip_times_start", self.trip_times_start.len(), trips)?;
-        same(
-            "pattern_trips_start",
-            self.pattern_trips_start.len(),
-            patterns + 1,
-        )?;
-        same(
-            "stop_patterns_start",
-            self.stop_patterns_start.len(),
-            stops + 1,
-        )?;
-        same(
-            "service_bits",
-            self.service_bits.len(),
-            self.service_ids.len() * self.service_words as usize,
-        )?;
-        check_csr(
-            "pattern_stops",
-            &self.pattern_stops_start,
-            &self.pattern_stops,
-            stops,
-        )?;
-        check_csr(
-            "pattern_trips",
-            &self.pattern_trips_start,
-            &self.pattern_trips,
-            trips,
-        )?;
-        check_csr(
-            "stop_patterns",
-            &self.stop_patterns_start,
-            &self.stop_patterns,
-            patterns,
-        )?;
-        all_below("stop_parent", &self.stop_parent, stops, true)?;
-        all_below("trip_route", &self.trip_route, routes, false)?;
-        all_below(
-            "trip_service",
-            &self.trip_service,
-            self.service_ids.len(),
-            false,
-        )?;
-        all_below("trip_pattern", &self.trip_pattern, patterns, false)?;
-        // Optional arrays (added in format 3): empty, or one entry per item.
-        let optional = |name: &str, len: usize, want: usize| {
-            if len == 0 {
-                Ok(())
-            } else {
-                same(name, len, want)
-            }
-        };
-        optional("trip_block_ids", self.trip_block_ids.len(), trips)?;
-        let times = self.stop_times.len() / 2;
-        optional("stop_pickup", self.stop_pickup.len(), times)?;
-        optional("stop_drop_off", self.stop_drop_off.len(), times)?;
-        for (name, v) in [
-            ("stop_pickup", &self.stop_pickup),
-            ("stop_drop_off", &self.stop_drop_off),
-        ] {
-            if let Some(x) = v.iter().find(|&&x| x > 3) {
-                return Err(format!("{name}: unknown value {x}"));
-            }
-        }
-        if self.transfer_start.is_empty() {
-            if !self.transfer_to.is_empty() {
-                return Err("transfer_to without transfer_start".to_string());
-            }
-        } else {
-            same("transfer_start", self.transfer_start.len(), stops + 1)?;
-            check_csr(
-                "transfer_to",
-                &self.transfer_start,
-                &self.transfer_to,
-                stops,
-            )?;
-        }
-        same(
-            "transfer_type",
-            self.transfer_type.len(),
-            self.transfer_to.len(),
-        )?;
-        same(
-            "transfer_secs",
-            self.transfer_secs.len(),
-            self.transfer_to.len(),
-        )?;
-        if let Some(k) = self.transfer_type.iter().find(|&&k| k > 3) {
-            return Err(format!("transfer_type: unknown value {k}"));
-        }
-        self.check_footpaths()?;
-        self.check_streets()?;
-        if let Some(k) = self.stop_kind.iter().find(|&&k| k > 2) {
-            return Err(format!("stop_kind: unknown value {k}"));
-        }
-        if let Some(a) = self.trip_approximate.iter().find(|&&a| a > 1) {
-            return Err(format!("trip_approximate: value {a} is not 0 or 1"));
-        }
-        // Every trip is in exactly the pattern that trip_pattern names.
-        if self.pattern_trips.len() != trips {
-            return Err("pattern_trips must list every trip once".to_string());
-        }
-        let mut seen = vec![false; trips];
-        for p in 0..patterns {
-            let start = self.pattern_trips_start[p] as usize;
-            let end = self.pattern_trips_start[p + 1] as usize;
-            for &t in &self.pattern_trips[start..end] {
-                let t = t as usize;
-                if seen[t] || self.trip_pattern[t] as usize != p {
-                    return Err(format!("trip {t} is listed wrongly in pattern {p}"));
-                }
-                seen[t] = true;
-            }
-        }
-        // Each trip's times fit in stop_times and don't overlap another trip's.
-        let mut ranges = Vec::with_capacity(trips);
-        for t in 0..trips {
-            let n = self.pattern_stops(self.trip_pattern[t] as usize).len();
-            let start = self.trip_times_start[t] as usize;
-            if start % 2 != 0 {
-                return Err(format!("times of trip {t} start at an odd offset"));
-            }
-            let end = start + 2 * n;
-            if end > self.stop_times.len() {
-                return Err(format!("times of trip {t} go past the end"));
-            }
-            ranges.push((start, end));
-        }
-        ranges.sort_unstable();
-        if ranges.windows(2).any(|w| w[1].0 < w[0].1) {
-            return Err("the times of two trips overlap".to_string());
-        }
-        Ok(())
+        check_arrays(self)
     }
 }
 
-impl TimetableData {
-    fn check_footpaths(&self) -> Result<(), String> {
-        let stops = self.stop_ids.len();
-        if self.footpath_start.is_empty() {
-            if !self.footpath_to.is_empty() {
-                return Err("footpath_to without footpath_start".to_string());
-            }
-        } else {
-            if self.footpath_start.len() != stops + 1 {
-                return Err(format!(
-                    "footpath_start has {} entries, expected {}",
-                    self.footpath_start.len(),
-                    stops + 1
-                ));
-            }
-            check_csr(
-                "footpath_to",
-                &self.footpath_start,
-                &self.footpath_to,
-                stops,
-            )?;
-        }
-        let n = self.footpath_to.len();
-        if self.footpath_secs.len() != n || self.footpath_m.len() != n {
-            return Err("footpath_secs/footpath_m do not match footpath_to".to_string());
-        }
-        Ok(())
-    }
+/// Lists every array of [`TimetableData`] once, in declaration order (the
+/// order rkyv writes and checks them), with its element type. Generates the
+/// [`A`] names, the [`Arrays`] view of an in-memory `TimetableData`, and where
+/// each array sits in the archived root (for the on-disk check, M7).
+macro_rules! arrays {
+    ($($v:ident => $f:ident: $t:ty,)*) => {
+        /// An array of [`TimetableData`] (`SegA` is "segment a", not the enum).
+        #[derive(Clone, Copy, Debug)]
+        #[allow(clippy::enum_variant_names)]
+        pub(crate) enum A { $($v,)* }
 
-    fn check_streets(&self) -> Result<(), String> {
-        let nodes = self.street_lat.len();
-        let segs = self.seg_a.len();
-        if self.street_lon.len() != nodes {
-            return Err("street_lon does not match street_lat".to_string());
-        }
-        if [
-            self.seg_b.len(),
-            self.seg_len_cm.len(),
-            self.seg_flags.len(),
-        ]
-        .iter()
-        .any(|&l| l != segs)
-        {
-            return Err("street segment arrays differ in length".to_string());
-        }
-        all_below("seg_a", &self.seg_a, nodes, false)?;
-        all_below("seg_b", &self.seg_b, nodes, false)?;
-        if let Some(f) = self.seg_flags.iter().find(|&&f| f > SEG_STEPS | SEG_ONEWAY) {
-            return Err(format!("seg_flags: unknown value {f}"));
-        }
-        if self.shape_lon.len() != self.shape_lat.len() {
-            return Err("shape_lon does not match shape_lat".to_string());
-        }
-        if segs == 0 && self.shape_start.is_empty() {
-            if !self.shape_lat.is_empty() {
-                return Err("shape points without segments".to_string());
+        impl A {
+            /// All arrays, in declaration order.
+            pub(crate) const ALL: &'static [A] = &[$(A::$v,)*];
+
+            /// Offset of the field in the archived root, and the size and
+            /// alignment of one archived element.
+            pub(crate) fn layout(self) -> (usize, usize, usize) {
+                match self {
+                    $(A::$v => (
+                        std::mem::offset_of!(ArchivedTimetableData, $f),
+                        std::mem::size_of::<rkyv::Archived<$t>>(),
+                        std::mem::align_of::<rkyv::Archived<$t>>(),
+                    ),)*
+                }
             }
+
+            /// True for the `Vec<String>` arrays.
+            pub(crate) fn is_strings(self) -> bool {
+                match self {
+                    $(A::$v => std::any::TypeId::of::<$t>() == std::any::TypeId::of::<String>(),)*
+                }
+            }
+        }
+
+        impl Arrays for TimetableData {
+            fn len(&self, a: A) -> usize {
+                match a { $(A::$v => self.$f.len(),)* }
+            }
+            fn get(&self, a: A, i: usize) -> i64 {
+                match a { $(A::$v => Num::num(&self.$f[i]),)* }
+            }
+            fn service_words(&self) -> u32 {
+                self.service_words
+            }
+        }
+    };
+}
+
+/// An element as i64 for [`Arrays::get`]; strings have no number (0).
+trait Num {
+    fn num(&self) -> i64;
+}
+
+impl Num for String {
+    fn num(&self) -> i64 {
+        0
+    }
+}
+
+macro_rules! num {
+    ($($t:ty),*) => { $(impl Num for $t { fn num(&self) -> i64 { *self as i64 } })* };
+}
+num!(u8, u16, u32, u64, i32);
+
+/// Where `service_words` sits in the archived root.
+pub(crate) const SERVICE_WORDS_AT: usize =
+    std::mem::offset_of!(ArchivedTimetableData, service_words);
+
+arrays! {
+    StopIds => stop_ids: String,
+    StopNames => stop_names: String,
+    StopLat => stop_lat: u64,
+    StopLon => stop_lon: u64,
+    StopKind => stop_kind: u8,
+    StopParent => stop_parent: u32,
+    RouteIds => route_ids: String,
+    RouteShortNames => route_short_names: String,
+    RouteLongNames => route_long_names: String,
+    RouteTypes => route_types: u16,
+    TripIds => trip_ids: String,
+    TripRoute => trip_route: u32,
+    TripService => trip_service: u32,
+    TripHeadsigns => trip_headsigns: String,
+    TripApproximate => trip_approximate: u8,
+    TripPattern => trip_pattern: u32,
+    TripTimesStart => trip_times_start: u32,
+    TripBlockIds => trip_block_ids: String,
+    PatternStopsStart => pattern_stops_start: u32,
+    PatternStops => pattern_stops: u32,
+    PatternTripsStart => pattern_trips_start: u32,
+    PatternTrips => pattern_trips: u32,
+    StopTimes => stop_times: u32,
+    StopPickup => stop_pickup: u8,
+    StopDropOff => stop_drop_off: u8,
+    StopPatternsStart => stop_patterns_start: u32,
+    StopPatterns => stop_patterns: u32,
+    TransferStart => transfer_start: u32,
+    TransferTo => transfer_to: u32,
+    TransferType => transfer_type: u8,
+    TransferSecs => transfer_secs: u32,
+    FootpathStart => footpath_start: u32,
+    FootpathTo => footpath_to: u32,
+    FootpathSecs => footpath_secs: u32,
+    FootpathM => footpath_m: u32,
+    StreetLat => street_lat: i32,
+    StreetLon => street_lon: i32,
+    SegA => seg_a: u32,
+    SegB => seg_b: u32,
+    SegLenCm => seg_len_cm: u32,
+    SegFlags => seg_flags: u8,
+    ShapeStart => shape_start: u32,
+    ShapeLat => shape_lat: i32,
+    ShapeLon => shape_lon: i32,
+    ServiceIds => service_ids: String,
+    ServiceBits => service_bits: u64,
+}
+
+/// Read access to the arrays of a timetable: the in-memory [`TimetableData`],
+/// or a pack body on disk (the streaming install check, M7). [`check_arrays`]
+/// works on both, so there is one set of rules.
+pub(crate) trait Arrays {
+    /// Length of an array.
+    fn len(&self, a: A) -> usize;
+    /// Element `i` (below `len(a)`) as i64 (u64 values may wrap; none is
+    /// compared; strings give 0).
+    fn get(&self, a: A, i: usize) -> i64;
+    /// [`TimetableData::service_words`].
+    fn service_words(&self) -> u32;
+}
+
+/// The first index of `a` whose value matches `bad`, with that value.
+fn find(t: &impl Arrays, a: A, bad: impl Fn(i64) -> bool) -> Option<i64> {
+    (0..t.len(a)).map(|i| t.get(a, i)).find(|&v| bad(v))
+}
+
+/// [`TimetableData::check`] on any [`Arrays`].
+pub(crate) fn check_arrays(t: &impl Arrays) -> Result<(), String> {
+    let stops = t.len(A::StopIds);
+    let trips = t.len(A::TripIds);
+    let patterns = t.len(A::PatternStopsStart).saturating_sub(1);
+    let same = |name: &str, len: usize, want: usize| {
+        if len == want {
+            Ok(())
         } else {
-            if self.shape_start.len() != segs + 1 {
-                return Err(format!(
-                    "shape_start has {} entries, expected {}",
-                    self.shape_start.len(),
-                    segs + 1
-                ));
-            }
-            let ok = self.shape_start.first() == Some(&0)
-                && self.shape_start.windows(2).all(|w| w[0] <= w[1])
-                && self.shape_start.last().map(|&e| e as usize) == Some(self.shape_lat.len());
-            if !ok {
-                return Err("shape_start: bad start offsets".to_string());
-            }
+            Err(format!("{name} has {len} entries, expected {want}"))
         }
-        let max_lat = (STREET_MAX_LAT * 1e7) as i32;
-        let lat_ok = |v: &[i32]| v.iter().all(|&x| (-max_lat..=max_lat).contains(&x));
-        let lon_ok = |v: &[i32]| {
-            v.iter()
-                .all(|&x| (-1_800_000_000..=1_800_000_000).contains(&x))
-        };
-        if !lat_ok(&self.street_lat)
-            || !lat_ok(&self.shape_lat)
-            || !lon_ok(&self.street_lon)
-            || !lon_ok(&self.shape_lon)
-        {
+    };
+    same("stop_names", t.len(A::StopNames), stops)?;
+    same("stop_lat", t.len(A::StopLat), stops)?;
+    same("stop_lon", t.len(A::StopLon), stops)?;
+    same("stop_kind", t.len(A::StopKind), stops)?;
+    same("stop_parent", t.len(A::StopParent), stops)?;
+    let routes = t.len(A::RouteIds);
+    same("route_short_names", t.len(A::RouteShortNames), routes)?;
+    same("route_long_names", t.len(A::RouteLongNames), routes)?;
+    same("route_types", t.len(A::RouteTypes), routes)?;
+    same("trip_route", t.len(A::TripRoute), trips)?;
+    same("trip_service", t.len(A::TripService), trips)?;
+    same("trip_headsigns", t.len(A::TripHeadsigns), trips)?;
+    same("trip_approximate", t.len(A::TripApproximate), trips)?;
+    same("trip_pattern", t.len(A::TripPattern), trips)?;
+    same("trip_times_start", t.len(A::TripTimesStart), trips)?;
+    same(
+        "pattern_trips_start",
+        t.len(A::PatternTripsStart),
+        patterns + 1,
+    )?;
+    same(
+        "stop_patterns_start",
+        t.len(A::StopPatternsStart),
+        stops + 1,
+    )?;
+    let services = t.len(A::ServiceIds);
+    same(
+        "service_bits",
+        t.len(A::ServiceBits),
+        services * t.service_words() as usize,
+    )?;
+    check_csr(
+        "pattern_stops",
+        t,
+        A::PatternStopsStart,
+        A::PatternStops,
+        stops,
+    )?;
+    check_csr(
+        "pattern_trips",
+        t,
+        A::PatternTripsStart,
+        A::PatternTrips,
+        trips,
+    )?;
+    check_csr(
+        "stop_patterns",
+        t,
+        A::StopPatternsStart,
+        A::StopPatterns,
+        patterns,
+    )?;
+    all_below("stop_parent", t, A::StopParent, stops, true)?;
+    all_below("trip_route", t, A::TripRoute, routes, false)?;
+    all_below("trip_service", t, A::TripService, services, false)?;
+    all_below("trip_pattern", t, A::TripPattern, patterns, false)?;
+    // Optional arrays (added in format 3): empty, or one entry per item.
+    let optional = |name: &str, len: usize, want: usize| {
+        if len == 0 {
+            Ok(())
+        } else {
+            same(name, len, want)
+        }
+    };
+    optional("trip_block_ids", t.len(A::TripBlockIds), trips)?;
+    let times = t.len(A::StopTimes) / 2;
+    optional("stop_pickup", t.len(A::StopPickup), times)?;
+    optional("stop_drop_off", t.len(A::StopDropOff), times)?;
+    for (name, a) in [
+        ("stop_pickup", A::StopPickup),
+        ("stop_drop_off", A::StopDropOff),
+    ] {
+        if let Some(x) = find(t, a, |x| x > 3) {
+            return Err(format!("{name}: unknown value {x}"));
+        }
+    }
+    if t.len(A::TransferStart) == 0 {
+        if t.len(A::TransferTo) != 0 {
+            return Err("transfer_to without transfer_start".to_string());
+        }
+    } else {
+        same("transfer_start", t.len(A::TransferStart), stops + 1)?;
+        check_csr("transfer_to", t, A::TransferStart, A::TransferTo, stops)?;
+    }
+    same(
+        "transfer_type",
+        t.len(A::TransferType),
+        t.len(A::TransferTo),
+    )?;
+    same(
+        "transfer_secs",
+        t.len(A::TransferSecs),
+        t.len(A::TransferTo),
+    )?;
+    if let Some(k) = find(t, A::TransferType, |k| k > 3) {
+        return Err(format!("transfer_type: unknown value {k}"));
+    }
+    check_footpaths(t, stops)?;
+    check_streets(t)?;
+    if let Some(k) = find(t, A::StopKind, |k| k > 2) {
+        return Err(format!("stop_kind: unknown value {k}"));
+    }
+    if let Some(a) = find(t, A::TripApproximate, |a| a > 1) {
+        return Err(format!("trip_approximate: value {a} is not 0 or 1"));
+    }
+    // Every trip is in exactly the pattern that trip_pattern names.
+    if t.len(A::PatternTrips) != trips {
+        return Err("pattern_trips must list every trip once".to_string());
+    }
+    let at = |a: A, i: usize| t.get(a, i) as usize;
+    let mut seen = vec![false; trips];
+    for p in 0..patterns {
+        for k in at(A::PatternTripsStart, p)..at(A::PatternTripsStart, p + 1) {
+            let tr = at(A::PatternTrips, k);
+            if seen[tr] || at(A::TripPattern, tr) != p {
+                return Err(format!("trip {tr} is listed wrongly in pattern {p}"));
+            }
+            seen[tr] = true;
+        }
+    }
+    // Each trip's times fit in stop_times and don't overlap another trip's.
+    let mut ranges = Vec::with_capacity(trips);
+    for tr in 0..trips {
+        let p = at(A::TripPattern, tr);
+        let n = at(A::PatternStopsStart, p + 1) - at(A::PatternStopsStart, p);
+        let start = at(A::TripTimesStart, tr);
+        if start % 2 != 0 {
+            return Err(format!("times of trip {tr} start at an odd offset"));
+        }
+        let end = start + 2 * n;
+        if end > t.len(A::StopTimes) {
+            return Err(format!("times of trip {tr} go past the end"));
+        }
+        ranges.push((start, end));
+    }
+    ranges.sort_unstable();
+    if ranges.windows(2).any(|w| w[1].0 < w[0].1) {
+        return Err("the times of two trips overlap".to_string());
+    }
+    Ok(())
+}
+
+fn check_footpaths(t: &impl Arrays, stops: usize) -> Result<(), String> {
+    if t.len(A::FootpathStart) == 0 {
+        if t.len(A::FootpathTo) != 0 {
+            return Err("footpath_to without footpath_start".to_string());
+        }
+    } else {
+        if t.len(A::FootpathStart) != stops + 1 {
             return Err(format!(
-                "street coordinate out of range (latitude beyond ±{STREET_MAX_LAT}° or longitude beyond ±180°)"
+                "footpath_start has {} entries, expected {}",
+                t.len(A::FootpathStart),
+                stops + 1
             ));
         }
-        // Bound the geometry, not just the ranges: every piece is short and
-        // the stored length matches the shape.
-        for g in 0..segs {
-            let node = |n: u32| (self.street_lat[n as usize], self.street_lon[n as usize]);
-            let r = self.shape_start[g] as usize..self.shape_start[g + 1] as usize;
-            let mid = r.map(|i| (self.shape_lat[i], self.shape_lon[i]));
-            let mut prev = node(self.seg_a[g]);
-            let mut len = 0.0;
-            for p in mid.chain(std::iter::once(node(self.seg_b[g]))) {
-                let d = haversine_e7(prev, p);
-                if d > STREET_MAX_PIECE_M {
-                    return Err(format!(
-                        "street segment {g}: a piece is longer than {STREET_MAX_PIECE_M} m ({d:.0} m)"
-                    ));
-                }
-                len += d;
-                prev = p;
-            }
-            let stored = f64::from(self.seg_len_cm[g]) / 100.0;
-            if (stored - len).abs() > SEG_LEN_TOLERANCE * len + 1.0 {
+        check_csr("footpath_to", t, A::FootpathStart, A::FootpathTo, stops)?;
+    }
+    let n = t.len(A::FootpathTo);
+    if t.len(A::FootpathSecs) != n || t.len(A::FootpathM) != n {
+        return Err("footpath_secs/footpath_m do not match footpath_to".to_string());
+    }
+    Ok(())
+}
+
+fn check_streets(t: &impl Arrays) -> Result<(), String> {
+    let nodes = t.len(A::StreetLat);
+    let segs = t.len(A::SegA);
+    if t.len(A::StreetLon) != nodes {
+        return Err("street_lon does not match street_lat".to_string());
+    }
+    if [t.len(A::SegB), t.len(A::SegLenCm), t.len(A::SegFlags)]
+        .iter()
+        .any(|&l| l != segs)
+    {
+        return Err("street segment arrays differ in length".to_string());
+    }
+    all_below("seg_a", t, A::SegA, nodes, false)?;
+    all_below("seg_b", t, A::SegB, nodes, false)?;
+    if let Some(f) = find(t, A::SegFlags, |f| f > i64::from(SEG_STEPS | SEG_ONEWAY)) {
+        return Err(format!("seg_flags: unknown value {f}"));
+    }
+    if t.len(A::ShapeLon) != t.len(A::ShapeLat) {
+        return Err("shape_lon does not match shape_lat".to_string());
+    }
+    if segs == 0 && t.len(A::ShapeStart) == 0 {
+        if t.len(A::ShapeLat) != 0 {
+            return Err("shape points without segments".to_string());
+        }
+    } else {
+        if t.len(A::ShapeStart) != segs + 1 {
+            return Err(format!(
+                "shape_start has {} entries, expected {}",
+                t.len(A::ShapeStart),
+                segs + 1
+            ));
+        }
+        if !starts_ok(t, A::ShapeStart, t.len(A::ShapeLat)) {
+            return Err("shape_start: bad start offsets".to_string());
+        }
+    }
+    let max_lat = i64::from((STREET_MAX_LAT * 1e7) as i32);
+    let out = |a: A, max: i64| find(t, a, |x| !(-max..=max).contains(&x)).is_some();
+    if out(A::StreetLat, max_lat)
+        || out(A::ShapeLat, max_lat)
+        || out(A::StreetLon, 1_800_000_000)
+        || out(A::ShapeLon, 1_800_000_000)
+    {
+        return Err(format!(
+            "street coordinate out of range (latitude beyond ±{STREET_MAX_LAT}° or longitude beyond ±180°)"
+        ));
+    }
+    // Bound the geometry, not just the ranges: every piece is short and
+    // the stored length matches the shape.
+    let at = |a: A, i: usize| t.get(a, i);
+    for g in 0..segs {
+        let node = |n: i64| {
+            let n = n as usize;
+            (at(A::StreetLat, n) as i32, at(A::StreetLon, n) as i32)
+        };
+        let r = at(A::ShapeStart, g) as usize..at(A::ShapeStart, g + 1) as usize;
+        let mid = r.map(|i| (at(A::ShapeLat, i) as i32, at(A::ShapeLon, i) as i32));
+        let mut prev = node(at(A::SegA, g));
+        let mut len = 0.0;
+        for p in mid.chain(std::iter::once(node(at(A::SegB, g)))) {
+            let d = haversine_e7(prev, p);
+            if d > STREET_MAX_PIECE_M {
                 return Err(format!(
-                    "street segment {g}: seg_len_cm says {stored:.2} m, the geometry {len:.2} m"
+                    "street segment {g}: a piece is longer than {STREET_MAX_PIECE_M} m ({d:.0} m)"
                 ));
             }
+            len += d;
+            prev = p;
         }
-        Ok(())
+        let stored = at(A::SegLenCm, g) as f64 / 100.0;
+        if (stored - len).abs() > SEG_LEN_TOLERANCE * len + 1.0 {
+            return Err(format!(
+                "street segment {g}: seg_len_cm says {stored:.2} m, the geometry {len:.2} m"
+            ));
+        }
     }
+    Ok(())
+}
+
+/// `start` begins at 0, never decreases and ends at `total`.
+fn starts_ok(t: &impl Arrays, start: A, total: usize) -> bool {
+    let n = t.len(start);
+    n > 0
+        && t.get(start, 0) == 0
+        && (1..n).all(|i| t.get(start, i - 1) <= t.get(start, i))
+        && t.get(start, n - 1) as usize == total
 }
 
 /// `start` must begin at 0, never decrease, end at `items.len()`, and every
 /// item must be below `max`.
-fn check_csr(name: &str, start: &[u32], items: &[u32], max: usize) -> Result<(), String> {
-    let ok = start.first() == Some(&0)
-        && start.windows(2).all(|w| w[0] <= w[1])
-        && start.last().map(|&e| e as usize) == Some(items.len());
-    if !ok {
+fn check_csr(name: &str, t: &impl Arrays, start: A, items: A, max: usize) -> Result<(), String> {
+    if !starts_ok(t, start, t.len(items)) {
         return Err(format!("{name}: bad start offsets"));
     }
-    all_below(name, items, max, false)
+    all_below(name, t, items, max, false)
 }
 
-fn all_below(name: &str, items: &[u32], max: usize, allow_none: bool) -> Result<(), String> {
-    match items
-        .iter()
-        .find(|&&i| (i as usize) >= max && !(allow_none && i == u32::MAX))
-    {
+fn all_below(
+    name: &str,
+    t: &impl Arrays,
+    items: A,
+    max: usize,
+    allow_none: bool,
+) -> Result<(), String> {
+    match find(t, items, |i| {
+        (i as usize) >= max && !(allow_none && i == i64::from(u32::MAX))
+    }) {
         Some(i) => Err(format!("{name}: index {i} out of range (max {max})")),
         None => Ok(()),
     }

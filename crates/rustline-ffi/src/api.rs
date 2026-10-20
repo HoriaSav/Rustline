@@ -20,7 +20,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate};
 use flutter_rust_bridge::frb;
 use rustline_core::{Engine, Leg, PlanError, PlanRequest, StopRef, TimeSpec, Warning};
 use rustline_model::LatLon;
-use rustline_pack::{PackError, DEFAULT_MAX_BODY_BYTES};
+use rustline_pack::{PackError, PackMeta, DEFAULT_MAX_BODY_BYTES};
 
 /// Largest UTC offset accepted from the device (ISO 8601 / tz database range).
 const MAX_OFFSET_SECS: i32 = 18 * 3600;
@@ -225,10 +225,20 @@ impl RustlineEngine {
 
 /// Installs a downloaded `.rlp.zst` at `dest`. Holds an exclusive lock on
 /// `{dest}.lock` for the whole install (a second install of the same `dest`
-/// waits), removes temp files a killed install left behind, decompresses and
-/// checks the pack in memory, checks the free space, writes its own
-/// `{name}.{pid}.{n}.tmp` (create_new), syncs it and renames it over `dest`.
-/// A bad download never touches an existing pack. The `.lock` file stays.
+/// waits), removes the temp files a killed install left behind (exactly
+/// `{name}.{pid}.{n}.tmp`), decompresses in 1 MiB chunks into its own
+/// `{name}.{pid}.{n}.tmp` (create_new) while checking the free space, syncs
+/// it, checks it from disk (header, size, CRC32 and the body: layout and every
+/// consistency rule `open` applies, plus the IANA timezone and the street-grid
+/// size, a few MiB at a time) and only then renames it over `dest`. A pack that
+/// fails is `pack_corrupt`. The pack is never held in memory (M7). A bad
+/// download never touches an existing pack. The `.lock` file stays. If `dest`
+/// is a symlink, the link itself is replaced by a regular file (its target is
+/// never written).
+///
+/// The returned info has the header fields only: the counts (stops … footpaths)
+/// are 0 and `street_graph` false, because the body is not loaded. Use
+/// `RustlineEngine.open(dest).info()` for them.
 pub fn install_pack(src_zst: String, dest: String) -> Result<FfiPackInfo, RustlineException> {
     guard(|| install(&src_zst, &dest, None))
 }
@@ -244,9 +254,10 @@ pub fn install_pack_with_free_space(
     guard(|| install(&src_zst, &dest, Some(free_bytes)))
 }
 
-/// Test hook: in debug builds a panic through the same guard as `plan` (so it
-/// comes back as `internal`); in profile/release builds it does nothing and
-/// returns `invalid_request`. Visible to Dart for the integration test.
+/// Test-only hook: in debug builds a panic through the same guard as `plan`
+/// (so it comes back as `internal`); in profile/release builds it does nothing
+/// and returns `invalid_request`. Visible to Dart for the integration test;
+/// apps must not call it.
 pub fn debug_inject_panic() -> Result<(), RustlineException> {
     guard(|| {
         if cfg!(debug_assertions) {
@@ -270,7 +281,8 @@ pub fn init_rustline() -> Result<(), RustlineException> {
 /// Installs the quiet panic hook (once per process).
 fn quiet_panics() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::panic::set_hook(Box::new(|_| eprintln!("rustline: panic caught"))));
+    // One fixed line: no payload, no file:line (they could hold user data).
+    ONCE.call_once(|| std::panic::set_hook(Box::new(|_| eprintln!("rustline: internal error"))));
 }
 
 /// Runs `f`; a panic becomes the fixed error `internal: internal error` (no
@@ -480,6 +492,27 @@ fn pack_info(e: &Engine) -> FfiPackInfo {
     }
 }
 
+/// Header fields of an installed pack; the counts stay 0 (body not loaded).
+fn header_info(m: &PackMeta) -> FfiPackInfo {
+    let hex = |b: &[u8; 32]| b.iter().map(|b| format!("{b:02x}")).collect();
+    FfiPackInfo {
+        feed_id: m.feed_id.clone(),
+        feed_sha256: hex(&m.feed_sha256),
+        osm_sha256: hex(&m.osm_sha256),
+        format_version: m.format_version,
+        valid_from_days: days(m.valid_from),
+        valid_to_days: days(m.valid_to),
+        timezone: m.timezone.clone(),
+        built_at_unix: m.built_at_unix,
+        stops: 0,
+        routes: 0,
+        trips: 0,
+        stop_times: 0,
+        street_graph: false,
+        footpaths: 0,
+    }
+}
+
 fn install(src: &str, dest: &str, free: Option<u64>) -> Result<FfiPackInfo, RustlineException> {
     let dest = Path::new(dest);
     let name = dest
@@ -494,65 +527,109 @@ fn install(src: &str, dest: &str, free: Option<u64>) -> Result<FfiPackInfo, Rust
     // Held until this function returns; another install of `dest` waits here.
     let _lock = lock(&dir.join(format!("{name}.lock")))?;
     // Temp files of an install that was killed (none can be running: we hold
-    // the lock). `{name}.tmp` is the name used before M6 review MF1.
+    // the lock). Only exact own names, only plain files (not symlinks).
     if let Ok(entries) = fs::read_dir(dir) {
-        let prefix = format!("{name}.");
         for e in entries.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with(&prefix) && n.ends_with(".tmp") {
+            let file = e.file_type().is_ok_and(|t| t.is_file());
+            if file && is_own_tmp(&name, &n) {
                 let _ = fs::remove_file(e.path());
             }
         }
     }
     let limit = DEFAULT_MAX_BODY_BYTES + HEADER_SLACK;
-    if fs::metadata(src).map_err(io_error)?.len() > limit {
+    let input = File::open(src).map_err(io_error)?;
+    if input.metadata().map_err(io_error)?.len() > limit {
         return Err(fail("pack_too_large", "download is over the pack limit"));
     }
-    let compressed = fs::read(src).map_err(io_error)?;
-    let mut bytes = Vec::new();
-    zstd::Decoder::new(&compressed[..])
-        .and_then(|d| d.take(limit + 1).read_to_end(&mut bytes))
-        .map_err(|e| fail("pack_corrupt", format!("not a valid .rlp.zst: {e}")))?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
-        return Err(fail(
-            "pack_too_large",
-            "pack unpacks to more than the limit",
-        ));
-    }
-    let engine = Engine::from_bytes(&bytes).map_err(pack_error)?;
-    let need = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let free = match free {
         Some(f) => f,
         None => free_space(dir)?,
     };
-    if need > free {
-        return Err(fail(
-            "no_space",
-            format!("the pack needs {need} bytes, {free} are free"),
-        ));
-    }
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = dir.join(format!("{name}.{}.{n}.tmp", std::process::id()));
-    let written = write_synced(&tmp, &bytes).and_then(|()| fs::rename(&tmp, dest));
-    if let Err(e) = written {
-        let _ = fs::remove_file(&tmp);
-        return Err(io_error(e));
-    }
+    let meta = copy_and_check(input, &tmp, limit, free).and_then(|meta| {
+        fs::rename(&tmp, dest).map_err(io_error)?;
+        Ok(meta)
+    });
+    let meta = match meta {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
     // Make the rename durable (best effort; not every platform allows it).
     if let Ok(d) = File::open(dir) {
         let _ = d.sync_all();
     }
-    Ok(pack_info(&engine))
+    Ok(header_info(&meta))
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = fs::OpenOptions::new()
+/// Is `n` a temp file of `install` for `name`: exactly `{name}.{pid}.{n}.tmp`?
+fn is_own_tmp(name: &str, n: &str) -> bool {
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    n.strip_prefix(name)
+        .and_then(|r| r.strip_prefix('.'))
+        .and_then(|r| r.strip_suffix(".tmp"))
+        .and_then(|r| r.split_once('.'))
+        .is_some_and(|(pid, k)| digits(pid) && digits(k))
+}
+
+/// Biggest zstd window accepted (8 MiB, what level 19 uses at most), so a
+/// crafted frame can't make the decoder allocate more.
+const ZSTD_WINDOW_LOG_MAX: u32 = 23;
+
+/// Decompresses `input` into `tmp` 1 MiB at a time (at most `limit` bytes and
+/// no more than `free`), syncs it, then checks the file from disk
+/// ([`rustline_pack::verify_pack_file`], then
+/// [`rustline_core::check_installable`]).
+fn copy_and_check(
+    input: File,
+    tmp: &Path,
+    limit: u64,
+    free: u64,
+) -> Result<PackMeta, RustlineException> {
+    let corrupt = |e: io::Error| fail("pack_corrupt", format!("not a valid .rlp.zst: {e}"));
+    let mut z = zstd::Decoder::new(input).map_err(corrupt)?;
+    z.window_log_max(ZSTD_WINDOW_LOG_MAX).map_err(corrupt)?;
+    let mut out = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
+        .open(tmp)
+        .map_err(io_error)?;
+    let mut buf = vec![0; 1 << 20];
+    let mut written = 0u64;
+    loop {
+        let k = z.read(&mut buf).map_err(corrupt)?;
+        if k == 0 {
+            break;
+        }
+        // range: k ≤ 1 MiB (the buffer), a usize.
+        written += k as u64;
+        if written > limit {
+            return Err(fail(
+                "pack_too_large",
+                "pack unpacks to more than the limit",
+            ));
+        }
+        if written > free {
+            return Err(fail(
+                "no_space",
+                format!("the pack needs more than {written} bytes, {free} are free"),
+            ));
+        }
+        out.write_all(&buf[..k]).map_err(io_error)?;
+    }
+    out.sync_all().map_err(io_error)?;
+    drop(out);
+    // Header, CRC32 and the whole body (layout and consistency), read from
+    // disk; then what `Engine::new` adds (timezone, street grid), so a pack
+    // that would not open never replaces one that does (Reviewer MF1).
+    let file = rustline_pack::verify_pack_file(tmp, DEFAULT_MAX_BODY_BYTES).map_err(pack_error)?;
+    rustline_core::check_installable(&file).map_err(pack_error)?;
+    Ok(file.meta)
 }
 
 /// Bytes free for this app in `dir`.
@@ -585,8 +662,40 @@ fn free_space(_dir: &Path) -> Result<u64, RustlineException> {
     Ok(u64::MAX)
 }
 
+/// Tries after `flock` was interrupted by a signal (EINTR); then `pack_io`.
+const FLOCK_RETRIES: u32 = 100;
+
+/// Debug-only test hook (not in Dart): the next `times` flock calls fail with
+/// `errno` instead of locking; `times` 0 turns it off.
+#[cfg(debug_assertions)]
+#[frb(ignore)]
+pub fn debug_flock_fail(errno: i32, times: u32) -> Result<(), RustlineException> {
+    *FLOCK_FAIL.lock().unwrap_or_else(|e| e.into_inner()) = (errno, times);
+    Ok(())
+}
+
+/// errno and how many calls are left.
+#[cfg(debug_assertions)]
+static FLOCK_FAIL: std::sync::Mutex<(i32, u32)> = std::sync::Mutex::new((0, 0));
+
+/// The injected flock failure, if any is left.
+#[cfg(debug_assertions)]
+fn injected_flock_error() -> Option<io::Error> {
+    let mut f = FLOCK_FAIL.lock().unwrap_or_else(|e| e.into_inner());
+    if f.1 == 0 {
+        return None;
+    }
+    f.1 -= 1;
+    Some(io::Error::from_raw_os_error(f.0))
+}
+
+#[cfg(not(debug_assertions))]
+fn injected_flock_error() -> Option<io::Error> {
+    None
+}
+
 /// An exclusive lock on `path` (created if missing), released when the file
-/// is dropped.
+/// is dropped. EINTR is retried up to [`FLOCK_RETRIES`] times.
 #[cfg(unix)]
 fn lock(path: &Path) -> Result<File, RustlineException> {
     use std::os::unix::io::AsRawFd;
@@ -596,11 +705,21 @@ fn lock(path: &Path) -> Result<File, RustlineException> {
         .truncate(false)
         .open(path)
         .map_err(io_error)?;
-    // SAFETY: the fd belongs to `f`, which outlives the call.
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(io_error(io::Error::last_os_error()));
+    for _ in 0..=FLOCK_RETRIES {
+        let err = match injected_flock_error() {
+            Some(e) => e,
+            // SAFETY: the fd belongs to `f`, which outlives the call.
+            None if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0 => return Ok(f),
+            None => io::Error::last_os_error(),
+        };
+        if err.raw_os_error() != Some(libc::EINTR) {
+            return Err(fail("pack_io", format!("could not lock the pack: {err}")));
+        }
     }
-    Ok(f)
+    Err(fail(
+        "pack_io",
+        "could not lock the pack: interrupted too often",
+    ))
 }
 
 /// Not unix (not a target today): no lock.

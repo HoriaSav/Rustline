@@ -17,6 +17,9 @@ thiserror = "2.0.21"
 # Own tolerant transfers.txt reader (M5): the same csv and zip versions and
 # features gtfs-structures already uses, so no new crates.
 csv = "1.4"
+# Own trips/stop_times reader (M7): csv's own low-level parser (already in the
+# tree through csv), used for its fixed-size buffers so a row can't grow memory.
+csv-core = "0.1.13"
 zip = { version = "7.2", default-features = false, features = ["deflate"] }
 # IANA timezone names: agency_timezone is checked at build time (M1 gap #4).
 chrono-tz = "0.10"
