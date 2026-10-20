@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The MSRV (workspace rust-version), so the phone build proves 1.85 too.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
