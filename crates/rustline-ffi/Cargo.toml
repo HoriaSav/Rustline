@@ -30,7 +30,7 @@ flutter_rust_bridge = { version = "=2.12.0", default-features = false, features 
 # Free space of the pack folder before installing (statvfs); already in Cargo.lock.
 libc = "0.2"
 # Decompressing a downloaded .rlp.zst in install_pack; same version as rustline-pack.
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 # Tests only: an anyhow::Error wrapper in the test adapter, tiny packs from GTFS.
