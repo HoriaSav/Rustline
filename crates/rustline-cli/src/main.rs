@@ -950,3 +950,5 @@ fn print_text(i: &Inspection) {
     println!();
     println!("load {} ms, build {} ms", i.load_ms, i.build_ms);
 }
+
+fn   ci_red_check( ) {}
