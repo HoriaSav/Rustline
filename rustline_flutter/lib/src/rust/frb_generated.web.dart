@@ -85,6 +85,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FfiStop dco_decode_ffi_stop(dynamic raw);
 
   @protected
+  FfiTag dco_decode_ffi_tag(dynamic raw);
+
+  @protected
   FfiTimeKind dco_decode_ffi_time_kind(dynamic raw);
 
   @protected
@@ -104,6 +107,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<FfiLeg> dco_decode_list_ffi_leg(dynamic raw);
+
+  @protected
+  List<FfiTag> dco_decode_list_ffi_tag(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -203,6 +209,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FfiStop sse_decode_ffi_stop(SseDeserializer deserializer);
 
   @protected
+  FfiTag sse_decode_ffi_tag(SseDeserializer deserializer);
+
+  @protected
   FfiTimeKind sse_decode_ffi_time_kind(SseDeserializer deserializer);
 
   @protected
@@ -223,6 +232,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<FfiLeg> sse_decode_list_ffi_leg(SseDeserializer deserializer);
+
+  @protected
+  List<FfiTag> sse_decode_list_ffi_tag(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -324,6 +336,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_ffi_stop(FfiStop self, SseSerializer serializer);
 
   @protected
+  void sse_encode_ffi_tag(FfiTag self, SseSerializer serializer);
+
+  @protected
   void sse_encode_ffi_time_kind(FfiTimeKind self, SseSerializer serializer);
 
   @protected
@@ -345,6 +360,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_ffi_leg(List<FfiLeg> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_ffi_tag(List<FfiTag> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_strict(

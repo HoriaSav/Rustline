@@ -548,7 +548,7 @@ enum Label { Ride { trip: TripIdx, board_stop: StopIdx, board_pos: u16 }, Walk {
 
 **7. Ranking (first version)**
 - *How:* keep per-round results, drop one with an extra ride unless ≥ 5 min earlier (`transfer_penalty`), cap `max_results`.
-  *Note (M3 review MF2):* M3 has no `max_results` parameter; the result is the whole Pareto set after the 5-minute rule (at most 9 journeys). `max_results` (including `max_results` = 0) arrives with `PlanRequest` in M4 and is tested there.
+  *Note (M3 review MF2):* M3 has no `max_results` parameter; the result is the whole Pareto set after the 5-minute rule (at most 9 journeys; M9 drops the rule for door-to-door plans, `raptor_stop_to_stop` keeps it). `max_results` (including `max_results` = 0) arrives with `PlanRequest` in M4 and is tested there.
 
 **8. CSA oracle (`tests/` or `transit/csa.rs` under `#[cfg(test)]` / feature `oracle`)**
 - *How:* sort all connections (one trip hop) by departure, scan once, earliest arrival only. ~60 lines.
@@ -1193,6 +1193,26 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 - Clearing labels between departures in a range → loses the speed-up and can break the "labels only improve" invariant.
 - Comparing journeys with `==` on floats/walking → use integer seconds/metres.
 
+### M9 decisions (Leader, 2026-10-23)
+1. `max_transfers` > 8 → `invalid_request` (**breaking**: M8 capped it to 8).
+2. `max_results` 0 or > 20 (`MAX_RESULTS`) → `invalid_request`. Over the cap the fastest and the fewest-transfers itineraries are always kept, then the others in order.
+3. No departure in the window → the same answer as window 0.
+4. Walking only counts as 0 transfers in the front.
+5. CLI `--window` takes plain seconds or `30m` / `2h` (cap `MAX_WINDOW_SECS` = 7 200 s); tags are printed; `--max-results` added (door to door only).
+6. Perf baseline: env vars measured in the same session; no criterion wiring in the test. **Re-baselined to M8** (Savin, 2026-10-23): window 0 depart-at p95 ≤ 1.2× M8 acf46b7, measured with m9_perf's own 400-query harness (seed 0x6d39, release) on 2026-10-23: defaults Brașov 0.951 ms, MBTA 16.571 ms (the criterion numbers, 0.866 / 13.18 ms, are not comparable with the in-test timing). Why: M8's depart-late pass already made depart-at about 2× slower than M7; that cost comes from M8, not M9, and is accepted. A cheaper depart-late is a later task (backlog below).
+7. Worst case on MBTA: 2 s accepted.
+8. Same-stop transfers follow the engine's rules (raptor.rs `self_transfer`): 0 s unless the stop has its own transfers.txt row (`X → X`; type 3 forbids the change). The oracle's 0 s assumption is Tester's to adjust.
+- The 5-minute rule is gone from door-to-door plans: the full (arrival, transfers) front is returned, tagged `Fastest` / `FewestTransfers` / `LeavesLatest` (ties get the tag too). Range answers are the front on (departure, arrival, transfers), sorted by departure then arrival; at most `MAX_RANGE_DEPARTURES` (256) departures are tried.
+- 30 min window perf (Savin, 2026-10-23): absolute p95 limits replace the "≤ 3× window 0" ratio: Brașov < 10 ms, MBTA < 80 ms (measured 43.7 ms, so about 1.8× headroom). Worst case on MBTA stays < 2 s.
+- Review R39 fixes (2026-10-23): the arrive-by range steps from the latest arrival found (minus 1 s), at most `MAX_RANGE_DEPARTURES` searches, and stops once the deadline leaves the window; the depart-at range keeps the 256 departures nearest the requested time (so the range property holds only for those 256 departures); the instant's journeys stay in a range answer only if they leave by the window's end; `FewestTransfers` and the cap's "fewest" compare transfers (walk only = one ride = 0). The fronts still compare rides: comparing transfers there drops a later walk-only option behind an earlier 1-ride one (breaks the M4 walk fallback tests), so that is Leader's call. FFI tags are an `FfiTag` enum; the example app has a window selector and shows tags. m9_perf (release, 2026-10-23 14:41): window 0 Brașov 1.044 ms (×1.10 M8), MBTA 17.283 ms (×1.04); 30 min depart-at Brașov 5.14 / MBTA 44.05 ms; 30 min arrive-by Brașov 2.84 / MBTA 44.27 ms; MBTA worst case depart-at 227.6 ms, arrive-by 58.1 ms, VmHWM 974 MB.
+- Final M9 rulings (Leader, 2026-10-23): the fronts stay on rides, so a walk-only option is never dropped by an earlier 1-ride trip; the `FewestTransfers` tag uses transfers (decision 4); the late end of a capped frequency window is checked with a second query (accepted). Over `max_results`, both modes always keep the fastest, the fewest-transfers and the leaves-latest itineraries; the rest are filled in order for depart-at and latest departure first for arrive-by; output order is unchanged. `Fastest` means the earliest arrival in both modes (in arrive-by it is not the shortest trip).
+- M9 recheck fix (2026-10-23): range answers are the Pareto set on (later departure, earlier arrival, fewer rides) in both directions. Root cause of the missing Brașov 08:28:31 → 08:55:17 option: `departures()` in raptor.rs seeded the access walks without `best_walk`, so a longer hop overwrote a shorter access walk and the door departure came out too early (outside the window). Fixed there. Arrive-by always-kept picks are latest, fewest, fastest (max_results 1 = the M8 answer); depart-at stays fastest, fewest, latest.
+- **Backlog (after M9):** pin the Brașov fixture used by the m9_review Brașov tests (sha in the manifest), or replace them with synthetic feeds; the random-feed property tests have no walking between stops, so they can't catch access/hop bugs like the one above.
+- **Backlog (after M9):** consider a shortest-duration tag/criterion for arrive-by (today `Fastest` = earliest arrival).
+- **Backlog (after M9):** `carry(k)` is O(stops × rounds) per range departure (carry only changed stops, or lazily); `departures()` builds a whole `Search` for the walk from the door (a small walk pass); arrive-by range mirrored in back.rs with label reuse (like `raptor_range`) instead of repeated `arrive` searches.
+- **Backlog (after M9):** a cheaper depart-late pass (today it is the M8 extra search in `plan.rs` `depart_at`), to win back the ~2× depart-at cost against M7.
+- Golden re-bless (Leader-approved): `golden/m9_window0.txt` gained 1 line, nothing changed or removed: seed 35880 q32 E→J, `17:07:19 → 17:59:07, 2 rides [l0t66,l2t27]` (2 min 30 s earlier than the 1-ride journey, so not dominated; the 5-minute rule used to hide it).
+
 **Time (est.):** 6–10 evenings.
 
 ---
@@ -1330,8 +1350,11 @@ Not planned in detail; write a new spec when you get here ([spec §14](Rustline-
 - **Backend-served packs:** backend_v2 builds a pack when FeedService detects a new sha and serves `/api/feeds/{id}/routing-pack` with the same ETag logic; the app downloads it instead of waiting for an app update.
 - **Realtime:** GTFS‑RT delay overlay (only if RATBV publishes it).
 - **Multi-city:** the other 12 feeds — re-check pack sizes and phone memory.
+- **M9 backlog:** carry only changed stops in `raptor_range`; a light walk pass in `departures()`; mirrored back.rs arrive-by range.
+- **Cheaper depart-late** (from M9): cut the M8 depart-late pass cost (depart-at ~2× M7 p95).
 - **Quality+ leftovers (from old M8):** McRAPTOR with walking as a 3rd criterion (capped bags, Pareto on arrival/rides/walk, phone p95 < 150 ms), walking weight, thesis material (criterion charts, RAPTOR vs CSA, pack size table, phone vs PC timings, `cargo doc`).
 - Live delays (GTFS-RT), wheelchair trips, delta pack updates, fares, pack-reader fuzzing.
+- **Public release:** make Rustline usable by other developers: a license, a versioned API with a changelog, docs for outside developers, publishing to crates.io and pub.dev, and possible Kotlin/Swift bindings. `rustline_flutter` stays in this repo, and the core stays framework-agnostic.
 
 ---
 

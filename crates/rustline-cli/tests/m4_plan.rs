@@ -538,16 +538,20 @@ fn poles_and_antimeridian_never_panic() {
 
 #[test]
 fn max_transfers_zero_and_255() {
-    // max_transfers 0: only 1-ride (or walk) itineraries; 255 is clamped (M3 hard cap).
+    // max_transfers 0: only 1-ride (or walk) itineraries; 8 is the hard max, 255 invalid (M9).
     let (_c, e) = city();
     let mut r = req(city::P0, city::Q, at(wed(), 8, 5, 0));
     r.max_transfers = 0;
     if let Ok(its) = plan(&e, &r) {
         assert!(its.iter().all(|i| i.rides <= 1), "{its:?}");
     }
-    r.max_transfers = 255;
+    r.max_transfers = 8;
     let its = plan(&e, &r).unwrap();
     assert!(its.iter().all(|i| i.rides <= 9), "{its:?}");
+    // M9 decision 1: over the hard max is an error, no longer clamped.
+    r.max_transfers = 255;
+    let err = plan(&e, &r).unwrap_err();
+    assert!(matches!(err, PlanError::InvalidRequest(_)), "{err:?}");
 }
 
 #[test]
@@ -570,8 +574,12 @@ fn max_results_caps_and_keeps_the_best_first() {
         Ok(v) => assert!(v.is_empty(), "{v:?}"),
         Err(err) => assert!(matches!(err, PlanError::InvalidRequest(_)), "{err:?}"),
     }
-    r.max_results = 255;
+    r.max_results = 20;
     assert_eq!(plan(&e, &r).unwrap(), all);
+    // M9 decision 2: over the hard cap of 20 is an error.
+    r.max_results = 255;
+    let err = plan(&e, &r).unwrap_err();
+    assert!(matches!(err, PlanError::InvalidRequest(_)), "{err:?}");
 }
 
 // ============================ properties ============================

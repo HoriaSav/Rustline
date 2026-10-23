@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `copy_and_check`, `core_request`, `count`, `days`, `fail`, `free_space`, `guard`, `header_info`, `injected_flock_error`, `install`, `io_error`, `is_own_tmp`, `itinerary`, `line`, `lock`, `ms`, `pack_error`, `pack_info`, `plan_error`, `quiet_panics`, `stop`, `warning`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseExplicitAttribute): `debug_flock_fail`, `install_pack_with_free_space`
 
 /// Installs a downloaded `.rlp.zst` at `dest`. Holds an exclusive lock on
@@ -72,6 +72,7 @@ class FfiItinerary {
   final int transfers;
   final int walkM;
   final List<FfiLeg> legs;
+  final List<FfiTag> tags;
 
   const FfiItinerary({
     required this.departureMs,
@@ -81,6 +82,7 @@ class FfiItinerary {
     required this.transfers,
     required this.walkM,
     required this.legs,
+    required this.tags,
   });
 
   @override
@@ -91,7 +93,8 @@ class FfiItinerary {
       arrivalOffsetSecs.hashCode ^
       transfers.hashCode ^
       walkM.hashCode ^
-      legs.hashCode;
+      legs.hashCode ^
+      tags.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -104,7 +107,8 @@ class FfiItinerary {
           arrivalOffsetSecs == other.arrivalOffsetSecs &&
           transfers == other.transfers &&
           walkM == other.walkM &&
-          legs == other.legs;
+          legs == other.legs &&
+          tags == other.tags;
 }
 
 class FfiLatLon {
@@ -245,6 +249,9 @@ class FfiPlanRequest {
   final double? walkSpeedMps;
   final int? maxTransfers;
 
+  /// Departure window in seconds (M9); `None` is 0.
+  final int? windowSecs;
+
   const FfiPlanRequest({
     required this.fromLat,
     required this.fromLon,
@@ -257,6 +264,7 @@ class FfiPlanRequest {
     this.maxAccessM,
     this.walkSpeedMps,
     this.maxTransfers,
+    this.windowSecs,
   });
 
   @override
@@ -271,7 +279,8 @@ class FfiPlanRequest {
       maxResults.hashCode ^
       maxAccessM.hashCode ^
       walkSpeedMps.hashCode ^
-      maxTransfers.hashCode;
+      maxTransfers.hashCode ^
+      windowSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -288,7 +297,8 @@ class FfiPlanRequest {
           maxResults == other.maxResults &&
           maxAccessM == other.maxAccessM &&
           walkSpeedMps == other.walkSpeedMps &&
-          maxTransfers == other.maxTransfers;
+          maxTransfers == other.maxTransfers &&
+          windowSecs == other.windowSecs;
 }
 
 class FfiPlanResponse {
@@ -340,6 +350,14 @@ class FfiStop {
           name == other.name &&
           lat == other.lat &&
           lon == other.lon;
+}
+
+/// Why an itinerary stands out among the options (M9).
+enum FfiTag {
+  fastest,
+  fewestTransfers,
+  leavesLatest,
+  ;
 }
 
 /// When `time_ms` is: leave then, or arrive by then (M8).

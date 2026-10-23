@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use flutter_rust_bridge::frb;
-use rustline_core::{Engine, Leg, PlanError, PlanRequest, StopRef, TimeSpec, Warning};
+use rustline_core::{Engine, Leg, PlanError, PlanRequest, StopRef, Tag, TimeSpec, Warning};
 use rustline_model::LatLon;
 use rustline_pack::{PackError, PackMeta, DEFAULT_MAX_BODY_BYTES};
 
@@ -76,6 +76,14 @@ pub enum FfiTimeKind {
     ArriveBy,
 }
 
+/// Why an itinerary stands out among the options (M9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiTag {
+    Fastest,
+    FewestTransfers,
+    LeavesLatest,
+}
+
 /// A trip request. `time_ms` is the departure (`DepartAt`) or the deadline
 /// (`ArriveBy`); `time_offset_secs` is the device's offset at that instant
 /// (only used to read the instant; the answer uses the feed's zone).
@@ -92,6 +100,8 @@ pub struct FfiPlanRequest {
     pub max_access_m: Option<u32>,
     pub walk_speed_mps: Option<f64>,
     pub max_transfers: Option<u8>,
+    /// Departure window in seconds (M9); `None` is 0.
+    pub window_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +120,7 @@ pub struct FfiItinerary {
     pub transfers: u8,
     pub walk_m: u32,
     pub legs: Vec<FfiLeg>,
+    pub tags: Vec<FfiTag>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -378,6 +389,7 @@ fn core_request(r: &FfiPlanRequest) -> Result<PlanRequest, RustlineException> {
     if let Some(n) = r.max_transfers {
         req.max_transfers = n;
     }
+    req.window_secs = r.window_secs.unwrap_or(0);
     Ok(req)
 }
 
@@ -473,6 +485,15 @@ fn itinerary(i: &rustline_core::Itinerary) -> FfiItinerary {
         transfers: i.transfers,
         walk_m: i.walk_m,
         legs,
+        tags: i
+            .tags
+            .iter()
+            .map(|t| match t {
+                Tag::Fastest => FfiTag::Fastest,
+                Tag::FewestTransfers => FfiTag::FewestTransfers,
+                Tag::LeavesLatest => FfiTag::LeavesLatest,
+            })
+            .collect(),
     }
 }
 

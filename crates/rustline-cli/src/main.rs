@@ -120,6 +120,13 @@ enum Command {
         /// door to door to 3).
         #[arg(long)]
         max_transfers: Option<u8>,
+        /// Departure window (arrive-by: arrival window), door to door: plain
+        /// seconds, or 30m / 2h; at most 2 h.
+        #[arg(long, value_parser = parse_window)]
+        window: Option<u32>,
+        /// Most itineraries to show (1–20, default 5), door to door.
+        #[arg(long)]
+        max_results: Option<u8>,
     },
 }
 
@@ -190,6 +197,8 @@ fn run(cli: Cli) -> Result<()> {
             at,
             arrive_by,
             max_transfers,
+            window,
+            max_results,
         } => {
             // clap makes exactly one of the two present.
             let (when, arrive) = match (at, arrive_by) {
@@ -197,6 +206,10 @@ fn run(cli: Cli) -> Result<()> {
                 (Some(t), None) => (t, false),
                 (None, None) => anyhow::bail!("give one of --at or --arrive-by"),
             };
+            let door = from.is_some() && to.is_some();
+            if !door && (window.is_some() || max_results.is_some()) {
+                anyhow::bail!("--window and --max-results need --from and --to");
+            }
             match (from_stop, to_stop, from, to) {
                 (Some(a), Some(b), _, _) if arrive => {
                     stops_arrive_by(&pack, &a, &b, &when, max_transfers)?
@@ -210,6 +223,7 @@ fn run(cli: Cli) -> Result<()> {
                     arrive,
                     false,
                     max_transfers,
+                    (window.unwrap_or(0), max_results),
                     geojson.as_deref(),
                 )?,
                 _ => anyhow::bail!("give --from and --to, or --from-stop and --to-stop"),
@@ -217,6 +231,45 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `--window`: plain seconds, or minutes / hours as `30m` / `2h`.
+fn parse_window(s: &str) -> Result<u32, String> {
+    let (n, unit) = match s.strip_suffix('m') {
+        Some(n) => (n, 60),
+        None => match s.strip_suffix('h') {
+            Some(n) => (n, 3600),
+            None => (s, 1),
+        },
+    };
+    let secs = n
+        .parse::<u32>()
+        .ok()
+        .and_then(|n| n.checked_mul(unit))
+        .ok_or_else(|| format!("window {s:?}: expected seconds, 30m or 2h"))?;
+    if secs > rustline_core::MAX_WINDOW_SECS {
+        return Err(format!(
+            "window {s:?} is over the {} s cap",
+            rustline_core::MAX_WINDOW_SECS
+        ));
+    }
+    Ok(secs)
+}
+
+/// `" [fastest, leaves_latest]"`, or nothing.
+fn tags(tags: &[rustline_core::Tag]) -> String {
+    if tags.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = tags
+        .iter()
+        .map(|t| match t {
+            rustline_core::Tag::Fastest => "fastest",
+            rustline_core::Tag::FewestTransfers => "fewest_transfers",
+            rustline_core::Tag::LeavesLatest => "leaves_latest",
+        })
+        .collect();
+    format!(" [{}]", names.join(", "))
 }
 
 fn is_pack(path: &Path) -> bool {
@@ -500,6 +553,7 @@ fn stops_arrive_by(
         true,
         true,
         Some(max_transfers.unwrap_or(8)),
+        (0, None),
         None,
     )
 }
@@ -514,6 +568,7 @@ fn door_to_door(
     arrive: bool,
     stop_to_stop: bool,
     max_transfers: Option<u8>,
+    (window, max_results): (u32, Option<u8>),
     geojson: Option<&Path>,
 ) -> Result<()> {
     let point = |s: &str, what: &str| -> Result<rustline_model::LatLon> {
@@ -561,6 +616,10 @@ fn door_to_door(
     if let Some(m) = max_transfers {
         req.max_transfers = m;
     }
+    if let Some(m) = max_results {
+        req.max_results = m;
+    }
+    req.window_secs = window;
     let r = engine.plan(&req)?;
     println!(
         "{},{} → {},{}, {}",
@@ -590,12 +649,13 @@ fn door_to_door(
     for (i, it) in r.itineraries.iter().enumerate() {
         println!();
         println!(
-            "{}. {} → {}, {} transfer(s), {} m walking",
+            "{}. {} → {}, {} transfer(s), {} m walking{}",
             i + 1,
             hm(it.departure),
             hm(it.arrival),
             it.transfers,
-            it.walk_m
+            it.walk_m,
+            tags(&it.tags)
         );
         for leg in &it.legs {
             let (kind, line, label) = match leg {

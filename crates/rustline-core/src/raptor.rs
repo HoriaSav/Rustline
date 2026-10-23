@@ -228,6 +228,108 @@ pub(crate) fn raptor_multi(
     search.run(origins)
 }
 
+/// Range RAPTOR (rRAPTOR): every door departure in `lo..=hi` at which a
+/// trip can be boarded from `access` ((stop, walk secs)), latest first, at
+/// most `cap` of them, in one search that keeps its labels. Each journey
+/// it returns beats every journey from a later departure on arrival or
+/// rides; its door departure is that of its run.
+pub(crate) fn raptor_range(
+    pack: &Pack,
+    days: &[(u32, u32)],
+    max_transfers: u8,
+    access: &[(u32, u32)],
+    targets: &[(u32, u32)],
+    hops: Hops,
+    (lo, hi, cap): (u32, u32, usize),
+) -> Result<Vec<(u32, Found)>, QueryError> {
+    let rounds = usize::from(max_transfers.min(MAX_TRANSFERS)) + 1;
+    let days = &days[..days.len().min(3)];
+    let doors = departures(pack, days, access, hops, lo, hi)?;
+    let mut search = Search::new(pack, days, rounds, hops);
+    for &(t, e) in targets {
+        let cell = search.egress.get_mut(t as usize).ok_or(BAD)?;
+        *cell = (*cell).min(e);
+    }
+    let mut out = Vec::new();
+    // Keep the `cap` departures nearest `lo`, still run latest first. The
+    // range property holds only for these 256 departures nearest the
+    // requested time; later ones in the window are not searched.
+    let skip = doors.len().saturating_sub(cap);
+    for door in doors.into_iter().skip(skip) {
+        let origins: Vec<(u32, u32)> = access
+            .iter()
+            .map(|&(s, a)| (s, door.saturating_add(a)))
+            .collect();
+        out.extend(search.run(&origins)?.into_iter().map(|f| (door, f)));
+    }
+    Ok(out)
+}
+
+/// The door departures in `lo..=hi` that board a trip right after the
+/// walk from the door (access, then at most one hop), latest first.
+fn departures(
+    pack: &Pack,
+    days: &[(u32, u32)],
+    access: &[(u32, u32)],
+    hops: Hops,
+    lo: u32,
+    hi: u32,
+) -> Result<Vec<u32>, QueryError> {
+    let mut walk = Search::new(pack, days, 0, hops);
+    walk.epoch = 1;
+    let mut first: Vec<(u32, u32)> = access.to_vec();
+    first.sort_unstable();
+    // Seed best_walk too (as `run` does): `walk_to` only compares with
+    // best_walk, so a longer hop must not overwrite an access walk.
+    for &(o, t) in &first {
+        let cell = walk.walk.get_mut(o as usize).ok_or(BAD)?;
+        *cell = (*cell).min(t);
+        walk.best_walk[o as usize] = *cell;
+    }
+    let mut reached: Vec<u32> = Vec::new();
+    for &(o, _) in &first {
+        let at = walk.walk[o as usize];
+        walk.hop_from(0, o as usize, at, &mut reached)?;
+    }
+    reached.extend(first.iter().map(|o| o.0));
+    reached.sort_unstable();
+    reached.dedup();
+    let tt = walk.tt;
+    let mut doors = Vec::new();
+    for &s in &reached {
+        let off = walk.walk[s as usize];
+        let range = csr(&tt.stop_patterns_start, s as usize);
+        for &p in tt.stop_patterns.get(range).unwrap_or(&[]) {
+            let stops = tt.pattern_stops(p as usize);
+            let trips = tt
+                .pattern_trips
+                .get(csr(&tt.pattern_trips_start, p as usize))
+                .unwrap_or(&[]);
+            for (i, _) in stops.iter().enumerate().filter(|x| *x.1 == s) {
+                for (slot, &(day, _)) in days.iter().enumerate() {
+                    for &trip in trips {
+                        let service = tt.trip_service.get(trip as usize).copied().unwrap_or(NONE);
+                        if walk.pickup(trip, i) == 1 || !tt.service_runs(service as usize, day) {
+                            continue;
+                        }
+                        let d = walk.shifted(trip, i, slot as u8).1; // slot < 3 (days[..3])
+                        if d == NONE || d < off {
+                            continue;
+                        }
+                        let door = d - off;
+                        if (lo..=hi).contains(&door) {
+                            doors.push(door);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    doors.sort_unstable_by(|a, b| b.cmp(a));
+    doors.dedup();
+    Ok(doors)
+}
+
 /// The stop itself, or for a station (`stop_kind` 1) its child platforms.
 fn platforms(pack: &Pack, stop: StopIdx) -> Vec<u32> {
     let tt = pack.timetable();
@@ -255,8 +357,9 @@ struct Search<'a> {
     n: usize,
     /// Egress time of each destination stop (`NONE`: not a destination).
     egress: Vec<u32>,
-    /// Earliest arrival at the destination (egress included) so far.
-    best_target: u32,
+    /// `best_target[k]`: earliest arrival at the destination (egress
+    /// included) so far with at most k + 1 rides.
+    best_target: Vec<u32>,
     hops: Hops,
     /// `ride[k * n + s]` / `walk[k * n + s]`: arrival at s in round k by a
     /// ride / a hop (only where round k improved it), with its label.
@@ -264,11 +367,15 @@ struct Search<'a> {
     ride_label: Vec<Option<RideLabel>>,
     walk: Vec<u32>,
     walk_label: Vec<Option<WalkLabel>>,
-    /// Earliest ride / walk arrival at each stop over all rounds so far.
+    /// `best_ride[k * n + s]` / `best_walk`: earliest ride / walk arrival at
+    /// s in any round up to k so far (kept between runs, as rRAPTOR).
     best_ride: Vec<u32>,
     best_walk: Vec<u32>,
-    /// Earliest time one can board at each stop, the round and arrival kind
-    /// it came from.
+    /// `stamp[s] == epoch`: s is already in this round's improved list.
+    stamp: Vec<u32>,
+    epoch: u32,
+    /// `ready[k * n + s]`: earliest time one can board at s after round k
+    /// (any round up to k), the round and arrival kind it came from.
     ready: Vec<u32>,
     ready_round: Vec<u8>,
     ready_walk: Vec<bool>,
@@ -290,23 +397,33 @@ impl<'a> Search<'a> {
             rounds,
             n,
             egress: vec![NONE; n],
-            best_target: NONE,
+            best_target: vec![NONE; rounds + 1],
             hops,
             ride: vec![NONE; cells],
             ride_label: vec![None; cells],
             walk: vec![NONE; cells],
             walk_label: vec![None; cells],
-            best_ride: vec![NONE; n],
-            best_walk: vec![NONE; n],
-            ready: vec![NONE; n],
-            ready_round: vec![0; n],
-            ready_walk: vec![false; n],
+            best_ride: vec![NONE; cells],
+            best_walk: vec![NONE; cells],
+            stamp: vec![0; n],
+            epoch: 0,
+            ready: vec![NONE; cells],
+            ready_round: vec![0; cells],
+            ready_walk: vec![false; cells],
             marked: Vec::new(),
             is_marked: vec![false; n],
         }
     }
 
-    fn run(mut self, origins: &[(u32, u32)]) -> Result<Vec<Found>, QueryError> {
+    /// One search from `origins`. Called again with earlier origin times
+    /// (latest departure first), it keeps what the later ones found and
+    /// only reports journeys they do not match or beat.
+    fn run(&mut self, origins: &[(u32, u32)]) -> Result<Vec<Found>, QueryError> {
+        for &s in &self.marked {
+            self.is_marked[s as usize] = false;
+        }
+        self.marked.clear();
+        self.epoch += 1;
         let mut first: Vec<(u32, u32)> = origins.to_vec();
         first.sort_unstable();
         for &(o, t) in &first {
@@ -317,6 +434,7 @@ impl<'a> Search<'a> {
                 self.walk_label[o] = Some(WalkLabel::Origin);
                 self.best_walk[o] = t;
             }
+            self.stamp[o] = self.epoch;
         }
         // Hops from the origin, as if it had been reached by a ride.
         let mut start: Vec<u32> = Vec::new();
@@ -339,14 +457,16 @@ impl<'a> Search<'a> {
                 best = Some((w.saturating_add(e), s));
             }
         }
-        if let Some((t, s)) = best {
-            self.best_target = t;
+        if let Some((t, s)) = best.filter(|b| b.0 < self.best_target[0]) {
+            self.best_target[0] = t;
             journeys.push(self.found(0, s, true, t)?);
         }
         for k in 1..=self.rounds {
+            self.carry(k);
             if self.marked.is_empty() {
-                break;
+                continue;
             }
+            self.epoch += 1;
             let rode = self.scan_patterns(k)?;
             let mut improved = Vec::new();
             for &s in &rode {
@@ -366,13 +486,13 @@ impl<'a> Search<'a> {
                 let (r, w) = (self.ride[k * self.n + s], self.walk[k * self.n + s]);
                 for (t, by_walk) in [(r, false), (w, true)] {
                     let t = if t == NONE { NONE } else { t.saturating_add(e) };
-                    if t < self.best_target && best.is_none_or(|b| (t, s) < (b.0, b.1)) {
+                    if t < self.best_target[k] && best.is_none_or(|b| (t, s) < (b.0, b.1)) {
                         best = Some((t, s, by_walk));
                     }
                 }
             }
             if let Some((t, s, by_walk)) = best {
-                self.best_target = t;
+                self.best_target[k] = t;
                 journeys.push(self.found(k, s, by_walk, t)?);
             }
         }
@@ -419,13 +539,14 @@ impl<'a> Search<'a> {
                 if let Some((t, slot, board, from_round, from_walk)) = on {
                     let trip = *trips.get(t).ok_or(BAD)?;
                     let (a, _) = self.shifted(trip, i, slot);
-                    let bound = self.best_ride[s].min(self.best_target);
+                    let bound = self.best_ride[row + s].min(self.best_target[k]);
                     if a < bound && self.drop_off(trip, i) != 1 {
-                        if self.ride[row + s] == NONE {
+                        if self.stamp[s] != self.epoch {
+                            self.stamp[s] = self.epoch;
                             improved.push(s as u32);
                         }
                         self.ride[row + s] = a;
-                        self.best_ride[s] = a;
+                        self.best_ride[row + s] = a;
                         self.ride_label[row + s] = Some(RideLabel {
                             trip,
                             slot,
@@ -437,8 +558,9 @@ impl<'a> Search<'a> {
                     }
                 }
                 // Board here, or switch to an earlier trip?
-                let r = self.ready[s];
-                if r == NONE || usize::from(self.ready_round[s]) >= k {
+                let before = (k - 1) * self.n + s;
+                let r = self.ready[before];
+                if r == NONE || usize::from(self.ready_round[before]) >= k {
                     continue;
                 }
                 // Only switch to a trip that leaves here earlier (ties: the
@@ -447,7 +569,8 @@ impl<'a> Search<'a> {
                 let now = on.map(|(t, slot, ..)| (self.shifted(trips[t], i, slot).1, slot, t));
                 if let Some((d, slot, t)) = self.earliest_trip(trips, i, r) {
                     if now.is_none_or(|n| (d, slot, t) < n) {
-                        on = Some((t, slot, i, self.ready_round[s], self.ready_walk[s]));
+                        let (round, walk) = (self.ready_round[before], self.ready_walk[before]);
+                        on = Some((t, slot, i, round, walk));
                     }
                 }
             }
@@ -575,16 +698,35 @@ impl<'a> Search<'a> {
         improved: &mut Vec<u32>,
     ) {
         let t = at.saturating_add(secs);
-        if t < self.best_walk[y] && t < self.best_target {
-            if self.walk[row + y] == NONE && self.ride[row + y] == NONE {
+        let k = row / self.n;
+        if t < self.best_walk[row + y] && t < self.best_target[k] {
+            if self.stamp[y] != self.epoch {
+                self.stamp[y] = self.epoch;
                 improved.push(y as u32);
             }
             self.walk[row + y] = t;
-            self.best_walk[y] = t;
+            self.best_walk[row + y] = t;
             self.walk_label[row + y] = Some(WalkLabel::Walk {
                 from: x as u32,
                 secs,
             });
+        }
+    }
+
+    /// Before round k: what round k - 1 reached, or could board at, round
+    /// k may too.
+    fn carry(&mut self, k: usize) {
+        let row = k * self.n;
+        self.best_target[k] = self.best_target[k].min(self.best_target[k - 1]);
+        for s in 0..self.n {
+            let (now, before) = (row + s, row - self.n + s);
+            self.best_ride[now] = self.best_ride[now].min(self.best_ride[before]);
+            self.best_walk[now] = self.best_walk[now].min(self.best_walk[before]);
+            if self.ready[before] < self.ready[now] {
+                self.ready[now] = self.ready[before];
+                self.ready_round[now] = self.ready_round[before];
+                self.ready_walk[now] = self.ready_walk[before];
+            }
         }
     }
 
@@ -605,10 +747,10 @@ impl<'a> Search<'a> {
             } else {
                 (by_ride, false)
             };
-            if t < self.ready[s] {
-                self.ready[s] = t;
-                self.ready_round[s] = k as u8;
-                self.ready_walk[s] = by_walk;
+            if t < self.ready[row + s] {
+                self.ready[row + s] = t;
+                self.ready_round[row + s] = k as u8;
+                self.ready_walk[row + s] = by_walk;
                 if !self.is_marked[s] {
                     self.is_marked[s] = true;
                     self.marked.push(s as u32);

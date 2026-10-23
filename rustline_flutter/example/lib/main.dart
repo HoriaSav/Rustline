@@ -1,5 +1,6 @@
-// Rustline example app (plan M6, M8): opens a pack and plans one Brașov journey,
-// leaving at 08:00 or (toggle) arriving by 08:00.
+// Rustline example app (plan M6, M8, M9): opens a pack and plans one Brașov journey,
+// leaving at 08:00 or (toggle) arriving by 08:00, over an optional window; each
+// option shows its tags.
 // Run: flutter run --release --dart-define=RUSTLINE_PACK=<path on the device>
 import 'package:flutter/material.dart';
 import 'package:rustline_flutter/rustline_flutter.dart';
@@ -23,6 +24,7 @@ class _PlanPageState extends State<PlanPage> {
       ? 'Pass --dart-define=RUSTLINE_PACK=<pack path on the device>'
       : 'Tap Plan';
   bool _arriveBy = false;
+  int _windowMin = 0;
 
   Future<void> _plan() async {
     try {
@@ -42,7 +44,8 @@ class _PlanPageState extends State<PlanPage> {
               timeKind: _arriveBy ? FfiTimeKind.arriveBy : FfiTimeKind.departAt,
               timeMs: t,
               timeOffsetSecs: 3 * 3600,
-              maxResults: 3));
+              maxResults: 5,
+              windowSecs: _windowMin * 60));
       final lines = r.itineraries.map((it) {
         final dep =
             DateTime.fromMillisecondsSinceEpoch(it.departureMs, isUtc: true)
@@ -50,7 +53,9 @@ class _PlanPageState extends State<PlanPage> {
         final arr =
             DateTime.fromMillisecondsSinceEpoch(it.arrivalMs, isUtc: true)
                 .add(Duration(seconds: it.arrivalOffsetSecs));
-        return '${_hm(dep)} → ${_hm(arr)}, ${it.transfers} transfers, ${it.walkM} m walk';
+        final tags = it.tags.map((t) => t.name).join(', ');
+        return '${_hm(dep)} → ${_hm(arr)}, ${it.transfers} transfers, ${it.walkM} m walk'
+            '${tags.isEmpty ? '' : ' [$tags]'}';
       });
       setState(() => _text = '${i.feedId}: load $loadMs ms, plan '
           '${sw.elapsedMilliseconds} ms\n${lines.join('\n')}');
@@ -74,6 +79,16 @@ class _PlanPageState extends State<PlanPage> {
             value: _arriveBy,
             onChanged: (v) => setState(() => _arriveBy = v),
           ),
+          Row(children: [
+            const Text('Window '),
+            DropdownButton<int>(
+              value: _windowMin,
+              items: [0, 15, 30, 60, 120]
+                  .map((m) => DropdownMenuItem(value: m, child: Text('$m min')))
+                  .toList(),
+              onChanged: (v) => setState(() => _windowMin = v ?? 0),
+            ),
+          ]),
           Text(_text),
         ]),
       ),

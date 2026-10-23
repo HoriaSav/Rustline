@@ -9,7 +9,8 @@
 //! 4. RAPTOR from all those stops, with footpaths between stops.
 //! 5. Walking only, if it is at most [`WALK_ONLY_MAX_M`]: kept when it
 //!    arrives no more than [`WALK_BONUS_SECS`] after the best ride.
-//! 6. Best in (arrival, rides), earliest first, at most `max_results`.
+//! 6. The Pareto front on (arrival, rides), earliest first (no 5-minute
+//!    rule since M9), at most `max_results`.
 //!
 //! Time (M5): the query instant's local date D in the feed's zone is the
 //! service date (outside the feed → [`PlanError::DateOutsideFeed`], no D − 1
@@ -23,10 +24,10 @@ use rustline_model::LatLon;
 use rustline_pack::Pack;
 
 use crate::back::{latest_departures, Incoming};
-use crate::raptor::{raptor_multi, Found, Hops};
+use crate::raptor::{raptor_multi, raptor_range, Found, Hops};
 use crate::street::{haversine_m, Snap, Streets, SEARCH_CAP_M};
 use crate::time::{day_ref, Clock};
-use crate::{QueryError, MAX_TRANSFERS, MORE_RIDES_MIN_GAIN_SECS};
+use crate::{QueryError, MAX_TRANSFERS};
 
 /// A point farther than this from every street is outside the coverage
 /// (inclusive: exactly 300 m still snaps). The straight walk to the street
@@ -47,6 +48,12 @@ pub const MAX_WALK_SPEED_MPS: f64 = 3.0;
 /// [`Warning::FeedExpiresSoon`] when at most this many days are left from
 /// the query's service date to the feed's last day.
 pub const EXPIRES_SOON_DAYS: i64 = 14;
+/// Longest departure window (M9): 2 h.
+pub const MAX_WINDOW_SECS: u32 = 7_200;
+/// Most departures one range search tries (M9).
+pub const MAX_RANGE_DEPARTURES: usize = 256;
+/// Most itineraries one answer may hold (M9).
+pub const MAX_RESULTS: u8 = 20;
 
 /// When to travel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +83,14 @@ pub struct PlanRequest {
     pub max_access_m: u32,
     /// Longest walk between two stops when changing, metres (≤ [`MAX_TRANSFER_M`]).
     pub max_transfer_m: u32,
-    /// Most transfers (capped at [`MAX_TRANSFERS`]).
+    /// Most transfers, at most [`MAX_TRANSFERS`] (M9: more is an error).
     pub max_transfers: u8,
-    /// Most itineraries to return (1–255).
+    /// Most itineraries to return, 1 to [`MAX_RESULTS`].
     pub max_results: u8,
+    /// Departure window in seconds (M9), at most [`MAX_WINDOW_SECS`]:
+    /// depart-at leaves in `[at, at + window]`, arrive-by arrives in
+    /// `[deadline − window, deadline]`. 0 is one instant.
+    pub window_secs: u32,
 }
 
 impl Default for PlanRequest {
@@ -96,6 +107,7 @@ impl Default for PlanRequest {
             max_transfer_m: 500,
             max_transfers: 3,
             max_results: 5,
+            window_secs: 0,
         }
     }
 }
@@ -123,8 +135,14 @@ impl PlanRequest {
         if self.max_transfer_m > MAX_TRANSFER_M {
             return Err(format!("max_transfer_m is at most {MAX_TRANSFER_M}"));
         }
-        if self.max_results == 0 {
-            return Err("max_results must be at least 1".to_string());
+        if self.max_transfers > MAX_TRANSFERS {
+            return Err(format!("max_transfers is at most {MAX_TRANSFERS}"));
+        }
+        if self.max_results == 0 || self.max_results > MAX_RESULTS {
+            return Err(format!("max_results must be in 1..={MAX_RESULTS}"));
+        }
+        if self.window_secs > MAX_WINDOW_SECS {
+            return Err(format!("window_secs is at most {MAX_WINDOW_SECS}"));
         }
         Ok(())
     }
@@ -250,12 +268,27 @@ pub struct Itinerary {
     pub transfers: u8,
     /// Metres walked in total.
     pub walk_m: u32,
+    /// What stands out about it among the answers (M9).
+    pub tags: Vec<Tag>,
+}
+
+/// Marks on an itinerary (M9); ties get the tag too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tag {
+    /// Earliest arrival.
+    Fastest,
+    /// Fewest transfers (walking only counts as 0).
+    FewestTransfers,
+    /// Latest departure.
+    LeavesLatest,
 }
 
 /// The answer to a [`PlanRequest`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanResponse {
-    /// Best first (earliest arrival, then fewer rides).
+    /// With a window: by door departure, then arrival. Without: depart-at by
+    /// arrival, then fewer rides; arrive-by by latest departure, then fewer
+    /// rides, less walking, earlier arrival.
     pub itineraries: Vec<Itinerary>,
     /// Things to tell the user.
     pub warnings: Vec<Warning>,
@@ -349,7 +382,7 @@ pub(crate) fn plan(
     } else {
         hops
     };
-    let limit = req.max_transfers.min(MAX_TRANSFERS);
+    let limit = req.max_transfers;
     let error = |e: QueryError| match e {
         QueryError::DateOutsideFeed { .. } => PlanError::DateOutsideFeed,
         e => PlanError::Internal(e.to_string()),
@@ -385,18 +418,17 @@ pub(crate) fn plan(
         latest_departures(pack, incoming, &days, limit, &targets, &origins, hops).map_err(error)
     };
     let access_secs = |s: u32| access.iter().find(|a| a.0 == s).map_or(0, |a| a.1.secs);
-    // The earliest arrival depart-at would show (after its 5-minute rule).
+    // The earliest arrival depart-at would show.
     let best_of = |found: Vec<Found>| {
-        five_minutes(found)
+        found
             .into_iter()
             .min_by_key(|f| (f.arrival, f.journey.rides))
     };
 
-    let mut rides: Vec<Found> = Vec::new();
-    if !arrive_by {
-        rides = five_minutes(forward(when, limit)?);
-        // Depart-late pass (spec §8.1 step 7): leave as late as still arrives
-        // as early, with no more rides.
+    // Depart-at from one instant, with the depart-late pass (spec §8.1
+    // step 7): leave as late as still arrives as early, with no more rides.
+    let depart_at = |door: u32| -> Result<Vec<Found>, PlanError> {
+        let mut rides = forward(door, limit)?;
         for f in rides.iter_mut() {
             let lim = f.journey.rides.saturating_sub(1);
             let door = door_departure(f, access_secs(f.origin));
@@ -411,23 +443,27 @@ pub(crate) fn plan(
                 }
             }
         }
-    } else {
-        // Latest departure per number of rides (plan M8 DoD: no later
-        // departure within the transfer limit is missed, so no 5-minute rule).
-        let picks = backward(when, limit)?;
-        // Each itinerary is the forward search from its departure, so it also
-        // arrives as early as it can (step 4); the latest may use any rides.
+        Ok(rides)
+    };
+    // Arrive-by: the latest departure per number of rides (plan M8 DoD: no
+    // later departure within the transfer limit is missed). Each itinerary
+    // is the forward search from its departure, so it also arrives as early
+    // as it can (step 4); the latest may use any rides.
+    let arrive = |deadline: u32| -> Result<Vec<Found>, PlanError> {
+        let picks = backward(deadline, limit)?;
         let last = picks.len().saturating_sub(1);
+        let mut rides = Vec::new();
         for (j, &(r, d)) in picks.iter().enumerate() {
             let lim = if j == last {
                 limit
             } else {
                 r.saturating_sub(1)
             };
-            // Only journeys that meet the deadline (no 5-minute rule: it could
-            // prefer one that arrives too late, review MF1), ranked as step 5:
+            // Only journeys that meet the deadline, ranked as step 5:
             // latest departure, then fewer rides, then earliest arrival.
-            let ok = forward(d, lim)?.into_iter().filter(|f| f.arrival <= when);
+            let ok = forward(d, lim)?
+                .into_iter()
+                .filter(|f| f.arrival <= deadline);
             let rank = |f: &Found| {
                 let dep = door_departure(f, access_secs(f.origin));
                 (std::cmp::Reverse(dep), f.journey.rides, f.arrival)
@@ -435,6 +471,63 @@ pub(crate) fn plan(
             if let Some(g) = ok.min_by_key(rank) {
                 rides.push(g);
             }
+        }
+        Ok(rides)
+    };
+
+    let mut rides = if arrive_by {
+        arrive(when)?
+    } else {
+        depart_at(when)?
+    };
+    // Range (M9), depart-at: one range search over every departure in the
+    // window, latest first, keeping its labels (rRAPTOR); the instant's
+    // journeys stay if they leave by the window's end. Nothing found in the
+    // window: the instant's answer (decision 3).
+    let mut ranged = false;
+    if req.window_secs > 0 && !rides.is_empty() && !arrive_by {
+        let hi = when.saturating_add(req.window_secs);
+        let origins: Vec<(u32, u32)> = access.iter().map(|(s, w)| (*s, w.secs)).collect();
+        let targets: Vec<(u32, u32)> = egress.iter().map(|(s, w)| (*s, w.secs)).collect();
+        let span = (when, hi, MAX_RANGE_DEPARTURES);
+        let found: Vec<Found> = raptor_range(pack, &days, limit, &origins, &targets, hops, span)
+            .map_err(error)?
+            .into_iter()
+            .map(|(_, f)| f)
+            .filter(|f| f.journey.rides > 0 && door_departure(f, access_secs(f.origin)) <= hi)
+            .collect();
+        if !found.is_empty() {
+            rides.retain(|f| door_departure(f, access_secs(f.origin)) <= hi);
+            rides.extend(found);
+        }
+        ranged = true;
+    }
+    // Range (M9), arrive-by: the next search's deadline is just before the
+    // latest arrival the one before found, so every arrival of the front is
+    // tried; at most MAX_RANGE_DEPARTURES searches, and it stops once the
+    // deadline leaves the window.
+    if req.window_secs > 0 && !rides.is_empty() && arrive_by {
+        let lo = when.saturating_sub(req.window_secs);
+        let mut all: Vec<Found> = Vec::new();
+        let mut step = rides.clone();
+        for _ in 0..MAX_RANGE_DEPARTURES {
+            step.retain(|f| f.arrival >= lo);
+            let next = step
+                .iter()
+                .map(|f| f.arrival)
+                .max()
+                .and_then(|t| t.checked_sub(1))
+                .filter(|&t| t >= lo);
+            all.append(&mut step);
+            let Some(t) = next else { break };
+            step = arrive(t)?;
+            if step.is_empty() {
+                break;
+            }
+        }
+        if !all.is_empty() {
+            rides = all;
+            ranged = true;
         }
     }
     let walk = q.direct(&from, &to);
@@ -482,6 +575,7 @@ pub(crate) fn plan(
                     arrival: time(arr),
                     transfers: 0,
                     walk_m: w.metres.round() as u32,
+                    tags: Vec::new(),
                 },
                 false,
             ));
@@ -500,26 +594,99 @@ pub(crate) fn plan(
         let dep = door_departure(f, acc.secs);
         out.push((dep, f.arrival, f.journey.rides, it, approx));
     }
-    // Depart-at: best in (arrival, rides). Arrive-by (step 5): latest
-    // departure, then fewer rides, less walking, earliest arrival. Drop
-    // anything another itinerary matches or beats.
-    if arrive_by {
-        out.sort_by_key(|o| (std::cmp::Reverse(o.0), o.2, o.3.walk_m, o.1));
+    // Depart-at: the front on (arrival, rides), earliest first. Arrive-by
+    // (step 5): latest departure, then fewer rides, less walking, earliest
+    // arrival. Range (M9): the front on (departure, arrival, rides), by
+    // departure then arrival. Drop anything another itinerary matches or beats.
+    // The cap and the FewestTransfers tag compare transfers: walking only
+    // and one ride both count as 0 (decision 4). The fronts still compare
+    // rides, so a later walk-only option is not dropped for an earlier ride.
+    let tr = |o: &(u32, u32, u8, Itinerary, bool)| o.2.saturating_sub(1);
+    let mut kept: Vec<(u32, u32, u8, Itinerary, bool)> = Vec::new();
+    if ranged {
+        out.sort_by_key(|o| (o.1, o.2, std::cmp::Reverse(o.0), o.3.walk_m));
+        for o in out {
+            if !kept.iter().any(|k| k.0 >= o.0 && k.1 <= o.1 && k.2 <= o.2) {
+                kept.push(o);
+            }
+        }
+        kept.sort_by_key(|k| (k.0, k.1));
     } else {
-        out.sort_by_key(|o| (o.1, o.2));
-    }
-    let mut kept: Vec<(Itinerary, bool)> = Vec::new();
-    let mut fewest = u8::MAX;
-    for (_, _, r, it, approx) in out {
-        if r < fewest {
-            fewest = r;
-            kept.push((it, approx));
+        if arrive_by {
+            out.sort_by_key(|o| (std::cmp::Reverse(o.0), o.2, o.3.walk_m, o.1));
+        } else {
+            out.sort_by_key(|o| (o.1, o.2));
+        }
+        let mut fewest = u8::MAX;
+        for o in out {
+            if o.2 < fewest {
+                fewest = o.2;
+                kept.push(o);
+            }
         }
     }
-    kept.truncate(usize::from(req.max_results));
     if kept.is_empty() {
         return Err(PlanError::NoRoute);
     }
+    // Over the cap: always keep the fastest (earliest arrival, both modes),
+    // the fewest transfers and the latest leaving, picked in that order for
+    // depart-at and latest, fewest, fastest for arrive-by (so max_results 1
+    // matches M8), then the others: in order for depart-at, latest
+    // departure first for arrive-by (plan M9 step 3).
+    // The kept ones stay in their order.
+    let max = usize::from(req.max_results);
+    if kept.len() > max {
+        let fastest = (0..kept.len())
+            .min_by_key(|&i| (kept[i].1, kept[i].2))
+            .unwrap_or(0);
+        let fewest = (0..kept.len())
+            .min_by_key(|&i| (tr(&kept[i]), kept[i].1))
+            .unwrap_or(0);
+        let latest = (0..kept.len())
+            .min_by_key(|&i| (std::cmp::Reverse(kept[i].0), kept[i].1))
+            .unwrap_or(0);
+        // The rest: depart-at in order, arrive-by latest departure first.
+        let mut rest: Vec<usize> = (0..kept.len()).collect();
+        if arrive_by {
+            rest.sort_by_key(|&i| std::cmp::Reverse(kept[i].0));
+        }
+        let mut keep = vec![false; kept.len()];
+        let mut n = 0;
+        let picks = if arrive_by {
+            [latest, fewest, fastest]
+        } else {
+            [fastest, fewest, latest]
+        };
+        for i in picks.into_iter().chain(rest) {
+            if n < max && !keep[i] {
+                keep[i] = true;
+                n += 1;
+            }
+        }
+        let mut i = 0;
+        kept.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+    }
+    let first_arr = kept.iter().map(|k| k.1).min().unwrap_or(0);
+    let few = kept.iter().map(tr).min().unwrap_or(0);
+    let late = kept.iter().map(|k| k.0).max().unwrap_or(0);
+    let kept: Vec<(Itinerary, bool)> = kept
+        .into_iter()
+        .map(|(dep, arr, r, mut it, approx)| {
+            for (yes, tag) in [
+                (arr == first_arr, Tag::Fastest),
+                (r.saturating_sub(1) == few, Tag::FewestTransfers),
+                (dep == late, Tag::LeavesLatest),
+            ] {
+                if yes {
+                    it.tags.push(tag);
+                }
+            }
+            (it, approx)
+        })
+        .collect();
     let approximate = kept.iter().any(|k| k.1);
     let kept: Vec<Itinerary> = kept.into_iter().map(|k| k.0).collect();
     let mut warnings = Vec::new();
@@ -559,22 +726,6 @@ pub(crate) fn plan(
         itineraries: kept,
         warnings,
     })
-}
-
-/// The 5-minute rule: a journey with more rides is kept only when it arrives
-/// at least 5 minutes earlier than every one with fewer rides.
-fn five_minutes(mut found: Vec<Found>) -> Vec<Found> {
-    found.sort_by_key(|f| (f.journey.rides, f.arrival));
-    let mut kept: Vec<Found> = Vec::new();
-    for f in found {
-        let better = kept
-            .last()
-            .is_none_or(|k| f.arrival.saturating_add(MORE_RIDES_MIN_GAIN_SECS) <= k.arrival);
-        if better {
-            kept.push(f);
-        }
-    }
-    kept
 }
 
 /// When a journey leaves the door: its first boarding minus the walks
@@ -898,6 +1049,7 @@ impl Query<'_> {
             arrival: time(t + egr.secs),
             transfers: rides.saturating_sub(1),
             walk_m,
+            tags: Vec::new(),
         };
         (it, approximate)
     }

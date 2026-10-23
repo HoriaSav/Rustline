@@ -183,6 +183,7 @@ pub fn req(from: (f64, f64), to: (f64, f64), t: (i64, i32)) -> FfiPlanRequest {
         max_access_m: Some(400),
         walk_speed_mps: None,
         max_transfers: None,
+        window_secs: None,
     }
 }
 
