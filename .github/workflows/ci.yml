@@ -91,12 +91,20 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
-          pub-cache-key: pub-${{ hashFiles('rustline_flutter/pubspec.lock', 'rustline_flutter/example/pubspec.lock') }}
+          pub-cache-key: >-
+            pub-${{ hashFiles('rustline_flutter/pubspec.yaml',
+            'rustline_flutter/example/pubspec.lock',
+            'rustline_flutter/cargokit/build_tool/pubspec.lock') }}
       - name: Flutter version
         run: flutter --version
       - name: Pub get
         run: |
-          (cd rustline_flutter && flutter pub get --enforce-lockfile)
+          # The plugin's pubspec.lock is gitignored (a package, not an app),
+          # so it cannot be enforced; the example app's committed lock is.
+          (cd rustline_flutter && flutter pub get)
+          # cargokit's build tool is its own package inside the plugin and
+          # `flutter analyze` in rustline_flutter covers it (committed lock).
+          (cd rustline_flutter/cargokit/build_tool && flutter pub get --enforce-lockfile)
           (cd rustline_flutter/example && flutter pub get --enforce-lockfile)
       - name: Analyze (plugin)
         working-directory: rustline_flutter
