@@ -8,6 +8,7 @@ Rustline is an offline public transport trip planner and transit routing library
 
 > An offline, on-device public-transport journey planner in Rust: it answers "I am at A at time T and want to get to B — what should I do?" from GTFS timetables and OpenStreetMap streets, without a server.
 
+[![CI](https://github.com/HoriaSav/Rustline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/HoriaSav/Rustline/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-in%20development-yellow)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
@@ -23,6 +24,7 @@ Rustline is an offline public transport trip planner and transit routing library
 - [Project Structure](#project-structure)
 - [Configuration](#configuration)
 - [Testing](#testing)
+- [Continuous integration](#continuous-integration)
 - [Roadmap](#roadmap)
 - [Similar projects](#similar-projects)
 - [Contributing](#contributing)
@@ -309,7 +311,23 @@ cargo test --locked --release -p rustline-osm --test m4_osm -- --ignored --nocap
 
 (The Brașov manifest's `departure_rows` = 157 698 counts one row per stop time *per day kind*; the GTFS stop_times count is 118 534.)
 
-GitHub Actions: `ci.yml` (fmt, clippy, test), `android.yml` (`cargo ndk` arm64-v8a build + .so size), `bench.yml` (`cargo bench`). The Flutter plugin's integration tests run on an x86_64 android-34 emulator (AVD `rustline_x64`).
+The Flutter plugin's integration tests run on an x86_64 android-34 emulator (AVD `rustline_x64`) locally, or in CI with `android-emulator.yml`. See [Continuous integration](#continuous-integration).
+
+## Continuous integration
+
+GitHub Actions workflows in `.github/workflows/`:
+
+| Workflow | Runs on | Jobs |
+|---|---|---|
+| `ci.yml` (CI) | push to `main`, every pull request, manual | `rust`: `cargo fmt --check`, `clippy -D warnings`, tests debug + release (stable); `msrv`: tests on Rust 1.85; `flutter`: `flutter analyze` (plugin + example), plugin `flutter test`, and a check that `flutter_rust_bridge_codegen generate` (2.12.0) leaves no diff |
+| `android.yml` (Android) | push to `main`, every pull request, manual | `ffi`: `cargo ndk` release build of `rustline-ffi` for arm64-v8a and x86_64 on Rust 1.85, `.so` size in the job summary; `apk`: example `flutter build apk --release`, APK and `.so` sizes in the summary |
+| `android-emulator.yml` | manual only | example `integration_test` on an x86_64 API 34 emulator; pack-based tests print `skip:` (no pack) |
+| `real-feeds.yml` | manual, and Mondays 04:00 UTC | fetches and verifies real feeds, then `cargo test --workspace --release` with them present |
+| `bench.yml` | manual only | `cargo bench -p rustline-core --bench plan` (spot checks; shared runners are noisy) |
+
+- Pull requests use the read-only `GITHUB_TOKEN` and no secrets (`pull_request`, not `pull_request_target`). Failed runs are not retried automatically.
+- `fixtures/feeds/` is git-ignored, so in `ci.yml` the real-feed tests skip. `scripts/fetch-fixtures.sh` downloads missing files listed in `fixtures/manifest.tsv` and checks each against its pinned sha256. A changed upstream file is saved as `<file>.new` and fails (`CHANGED`). `--verify` only checks; `--skip-manual` reports files without a public URL as `SKIP` (used by `real-feeds.yml` and `bench.yml`). `real-feeds.yml` caches the feeds keyed by the manifest hash.
+- Dependabot (`.github/dependabot.yml`) opens one grouped PR per week each for Cargo and GitHub Actions (at most 5 open). Ignored: `flutter_rust_bridge` (upgraded by hand with the codegen, the Dart package and the regenerated bindings), `gtfs-structures` ≥ 0.49 (needs Rust newer than the 1.85 MSRV) and `dtolnay/rust-toolchain` (pinned to a commit).
 
 ## Roadmap
 
@@ -323,7 +341,7 @@ GitHub Actions: `ci.yml` (fmt, clippy, test), `android.yml` (`cargo ndk` arm64-v
 - [ ] M7 — Cleanup: M1 Known gaps #1–3, #5, #6 + M6 Reviewer leftovers *(built, in review)*
 - [x] M8 — Arrive-by: "be there by 09:00" (reverse RAPTOR)
 - [x] M9 — rRAPTOR options: Pareto (arrival vs transfers) + departure-window range queries
-- [ ] M10 — GitHub CI: fmt, clippy, tests debug+release, Flutter tests, Android build
+- [x] M10 — GitHub CI: fmt, clippy, tests debug+release, Flutter tests, Android build
 - [ ] M11 — iOS build: xcframework + Cargokit iOS on GitHub macOS runners
 - [ ] M12 — Server (optional): same engine behind `POST /v1/plan`
 - [ ] M13 — RoTransit integration
