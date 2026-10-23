@@ -1,9 +1,17 @@
 name: CI
 
+# Plan M10 steps 1, 2, 5, 6. Required on every push to main and every PR.
+# PR jobs use the read-only GITHUB_TOKEN and no secrets (`pull_request`, never
+# `pull_request_target`), so runs from forks cannot write.
+# Real-feed tests: fixtures/feeds/ is gitignored, so here those tests skip
+# (missing file) or stay #[ignore]; they run in real-feeds.yml (step 6).
+# Reruns: no automatic retry. A flaky failure is rerun by hand once and then
+# fixed or reported (plan M10 decision 4); never hidden by a retry loop.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,20 +22,105 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  FLUTTER_VERSION: 3.27.4
+  FRB_VERSION: 2.12.0
 
 jobs:
   rust:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          persist-credentials: false
+      # rust-toolchain.toml selects stable (with rustfmt, clippy).
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Test
+      - name: Test (debug)
         run: cargo test --locked --workspace
+      - name: Test (release)
+        run: cargo test --locked --workspace --release
+
+  msrv:
+    name: MSRV 1.85 test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Overrides rust-toolchain.toml (stable) for every cargo call here.
+      RUSTUP_TOOLCHAIN: "1.85"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: msrv
+      - name: Toolchain
+        run: rustc --version
+      # Builder checklist 2: `cargo +1.85 test --locked --workspace`.
+      - name: Test
+        run: cargo +1.85 test --locked --workspace
+
+  flutter:
+    name: flutter analyze, test, FRB up to date
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: flutter
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2  # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+          pub-cache-key: pub-${{ hashFiles('rustline_flutter/pubspec.lock', 'rustline_flutter/example/pubspec.lock') }}
+      - name: Flutter version
+        run: flutter --version
+      - name: Pub get
+        run: |
+          (cd rustline_flutter && flutter pub get --enforce-lockfile)
+          (cd rustline_flutter/example && flutter pub get --enforce-lockfile)
+      - name: Analyze (plugin)
+        working-directory: rustline_flutter
+        run: flutter analyze
+      - name: Analyze (example)
+        working-directory: rustline_flutter/example
+        run: flutter analyze
+      # Host unit tests. The example has no test/ dir: its tests are
+      # integration tests on a device (android-emulator.yml).
+      - name: Test (plugin)
+        working-directory: rustline_flutter
+        run: flutter test
+      - name: Install flutter_rust_bridge_codegen
+        run: cargo install --locked flutter_rust_bridge_codegen --version "$FRB_VERSION"
+      - name: Generate FRB code
+        working-directory: rustline_flutter
+        run: flutter_rust_bridge_codegen generate
+      # diff: changed tracked files; status: also new untracked files.
+      - name: Generated FRB code is up to date
+        run: |
+          git diff --exit-code -- rustline_flutter crates/rustline-ffi
+          left="$(git status --porcelain -- rustline_flutter crates/rustline-ffi)"
+          if [ -n "$left" ]; then
+            echo "::error::flutter_rust_bridge_codegen left new or changed files:"
+            echo "$left"
+            exit 1
+          fi

@@ -29,6 +29,9 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # Benchmarks (plan M5 step 8, `cargo bench -p rustline-core`); 0.5 builds on
 # Rust 1.85. No plots, no rayon: only the timing harness.
 criterion = { version = "0.5", default-features = false }
+# Pins real-feed fixtures to the manifest sha256 (plan M10 step 6); tests only.
+# Same version as rustline-pack/cli, so no new crate in Cargo.lock.
+sha2 = "0.10"
 
 [[bench]]
 name = "plan"

@@ -2,24 +2,43 @@
 //! ~31 MiB of 1-byte list items must not make the reader hold many times that.
 //! Lists (packed varints, string tables, way refs) are capped at
 //! `max_blob_bytes / 64` items per block. A counting allocator measures the
-//! peak heap of each parse. The peak is per process, so every test holds `ONE`
-//! from its first line (input building included); default threads are fine.
+//! peak heap of each parse, counting only the calling thread's allocations
+//! (the parse is single-threaded). A process-wide count could also see
+//! other threads (libtest), the likely cause of 79 MiB on GitHub runners where
+//! the parse itself is 48 MiB (plan M10 decision 5). Tests still hold `ONE`.
 
 #[path = "m4_pbf/mod.rs"]
 mod m4_pbf;
 
 use m4_pbf::*;
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 
 struct Counting;
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-/// The peak is per process: one test at a time, input building included
-/// (parallel tests share the counting allocator).
+thread_local! {
+    // Per thread, so only the measured thread counts. Signed: a block freed
+    // here may have been allocated before `parse` took its base. Const-init
+    // `Cell`s never allocate, so the allocator may touch them.
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
+/// One test at a time keeps the measured parses apart (and their output).
 static ONE: Mutex<()> = Mutex::new(());
+
+fn live() -> isize {
+    LIVE.with(Cell::get)
+}
+
+fn count(delta: isize) {
+    // `try_with`: thread-local storage can be gone while a thread exits.
+    let _ = LIVE.try_with(|l| {
+        let now = l.get() + delta;
+        l.set(now);
+        let _ = PEAK.try_with(|p| p.set(p.get().max(now)));
+    });
+}
 
 /// Taken on the first line of every test in this file.
 fn one() -> std::sync::MutexGuard<'static, ()> {
@@ -31,14 +50,14 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let p = System.alloc(l);
         if !p.is_null() {
-            let now = LIVE.fetch_add(l.size(), Relaxed) + l.size();
-            PEAK.fetch_max(now, Relaxed);
+            // Layout sizes are at most isize::MAX, so this never saturates.
+            count(isize::try_from(l.size()).unwrap_or(isize::MAX));
         }
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         System.dealloc(p, l);
-        LIVE.fetch_sub(l.size(), Relaxed);
+        count(-isize::try_from(l.size()).unwrap_or(isize::MAX));
     }
 }
 
@@ -83,12 +102,12 @@ fn block(group: &[u8]) -> Vec<u8> {
 fn parse(name: &str, bytes: &[u8]) -> (Result<usize, String>, usize) {
     let d = TempDir::new("amp");
     let p = d.file("case.osm.pbf", bytes);
-    let base = LIVE.load(Relaxed);
-    PEAK.store(base, Relaxed);
+    let base = live();
+    PEAK.with(|p| p.set(base));
     let r = rustline_osm::build_foot_graph(&p, None)
         .map(|(g, _)| g.node_coords().len())
         .map_err(|e| e.to_string());
-    let peak = PEAK.load(Relaxed).saturating_sub(base);
+    let peak = usize::try_from(PEAK.with(Cell::get) - base).unwrap_or(0);
     println!(
         "{name}: file {} KB, heap peak {} MiB, {r:?}",
         bytes.len() >> 10,

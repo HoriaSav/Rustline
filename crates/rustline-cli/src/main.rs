@@ -475,7 +475,20 @@ fn file_sha256(path: &Path) -> Result<[u8; 32]> {
     use sha2::{Digest, Sha256};
     let mut f = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut f, &mut hasher)?;
+    // Through `Digest::update`, not `io::copy`: sha2 0.11 hashers are not
+    // `io::Write` (Dependabot sha2 0.11, plan M10 step 7).
+    let mut buf = vec![0u8; 64 << 10];
+    loop {
+        let n = match std::io::Read::read(&mut f, &mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     Ok(hasher.finalize().into())
 }
 

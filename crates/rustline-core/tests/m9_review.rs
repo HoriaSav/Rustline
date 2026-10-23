@@ -7,6 +7,37 @@ use chrono::{Duration, NaiveTime};
 use m9_common::api9::*;
 use m9_common::*;
 use rustline_core::TimeSpec;
+use std::path::PathBuf;
+
+/// A real-feed fixture from fixtures/manifest.tsv, pinned to its sha256
+/// (plan M10 step 6, M9 backlog): None (printing `skip:`) when the file is
+/// missing; a different file fails instead of silently testing another feed.
+fn pinned_fixture(name: &str) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let manifest = std::fs::read_to_string(workspace("fixtures/manifest.tsv")).unwrap();
+    let row: Vec<&str> = manifest
+        .lines()
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .find(|c| c.first() == Some(&name))
+        .unwrap_or_else(|| panic!("{name} not in fixtures/manifest.tsv"));
+    let (file, sha) = (row[1], row[3]);
+    let path = workspace(&format!("fixtures/feeds/{file}"));
+    let Ok(bytes) = std::fs::read(&path) else {
+        println!("skip: {} missing", path.display());
+        return None;
+    };
+    let got: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        got,
+        sha,
+        "{} is not the pinned {name} (run scripts/fetch-fixtures.sh --verify)",
+        path.display()
+    );
+    Some(path)
+}
 
 fn arrive_window(
     from: &str,
@@ -171,11 +202,9 @@ fn departure_cap_keeps_the_earliest_departures() {
 /// 08:36:31, as window 0 gives), and leaves_latest is the latest-leaving one.
 #[test]
 fn arrive_by_cap_keeps_the_latest_departures() {
-    let path = workspace("fixtures/feeds/brasov-latest.zip");
-    if !path.is_file() {
-        println!("skip: {} missing", path.display());
+    let Some(path) = pinned_fixture("brasov-latest") else {
         return;
-    }
+    };
     let e = engine(pack_of(&path));
     let t = at(2026, 10, 27, 9, 0, 0, 2);
     let r = window(
@@ -217,11 +246,9 @@ fn arrive_by_cap_keeps_the_latest_departures() {
 /// access walk, so that door was computed too early (outside the window).
 #[test]
 fn depart_at_range_keeps_later_departure_with_more_rides() {
-    let path = workspace("fixtures/feeds/brasov-latest.zip");
-    if !path.is_file() {
-        println!("skip: {} missing", path.display());
+    let Some(path) = pinned_fixture("brasov-latest") else {
         return;
-    }
+    };
     let e = engine(pack_of(&path));
     let t = at(2026, 10, 27, 8, 0, 0, 2);
     let mut r = window(

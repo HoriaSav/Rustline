@@ -1237,6 +1237,7 @@ dependencies = [
  "rustline-gtfs",
  "rustline-model",
  "rustline-pack",
+ "sha2",
  "thiserror",
 ]
 

@@ -1237,6 +1237,7 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
    - #6 sha2 0.10.9 → 0.11.0: compile error in `rustline-cli`, E0277 `sha2::Sha256: std::io::Write` not satisfied (0.11 API change). Needs a code change, e.g. hash through `Digest::update` instead of `io::copy`.
    - #7 criterion 0.5.1 → 0.7.0: the same `osm_amplification` heap-peak failure (79 MiB); the benches compile, but check for API changes before merging.
    - After the fixes, the grouped weekly PRs should replace these, so close any that are superseded.
+   - **Status 2026-10-23:** #3–#7 closed (superseded by the grouped #8, still open: sha2 0.11, zstd 0.14, criterion 0.7, flutter_rust_bridge 2.13.0, libc, gtfs-structures 0.48.2, zip 8.6); #2 replaced by the checkout v7.0.1 sha pin (close it). flutter_rust_bridge is now ignored by Dependabot (decision 7), so #8 should be recreated without it.
 
 ### Done when
 - [ ] CI green on a PR for all jobs; a deliberately failing test/fmt/clippy turns it red
@@ -1251,6 +1252,20 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 - **Tester will check:** one green and one intentionally red run linked in the report.
 
 **Time (est.):** 2–4 evenings. (Pushing workflows needs Savin's "push".)
+
+### Decisions (Builder, 2026-10-23)
+1. **Workflows.** `ci.yml` (required): `rust` (fmt, clippy, test debug + release on stable), `msrv` (`cargo +1.85 test --locked --workspace`, `RUSTUP_TOOLCHAIN=1.85` because `rust-toolchain.toml` says stable), `flutter` (Flutter 3.27.4: `pub get --enforce-lockfile`, `flutter analyze` in the plugin and the example, `flutter test` in the plugin, then `flutter_rust_bridge_codegen` 2.12.0 `generate` + `git diff --exit-code`). `android.yml` (required): `cargo ndk` arm64-v8a + x86_64 on 1.85 with NDK 26.1.10909125 and `.so` sizes in the job summary, and `flutter build apk --release` of the example with APK/`.so` sizes. `android-emulator.yml` (manual, step 4) and `real-feeds.yml` (manual + weekly, step 6) are not required checks. `bench.yml` stays manual.
+2. **Hardening (step 5).** Every action pinned to a commit sha with the tag as a comment (`actions/checkout` v7.0.1 = `3d3c42e5aac5ba805825da76410c181273ba90b1`, from `git ls-remote`; this replaces Dependabot #2) (Dependabot updates both; `dtolnay/rust-toolchain` stays ignored and gets the toolchain via `with: toolchain`). `permissions: contents: read`, `concurrency` cancel-in-progress and `timeout-minutes` on every job. Only `pull_request` triggers (no `pull_request_target`), so PR jobs have no secrets and fork runs cannot write. Caches: `Swatinem/rust-cache` (one key per job), Gradle via `setup-java`, pub via `flutter-action`.
+3. **Real feeds (step 6).** Required CI has no feeds: real-feed tests skip (missing file) or stay `#[ignore]`, as today. `real-feeds.yml` runs `scripts/fetch-fixtures.sh --skip-manual` (new flag: rows without a public URL, e.g. `brasov-manifest`, are SKIP instead of a failure), which verifies every file's manifest sha256 before the tests, caches `fixtures/feeds` by the manifest hash, then runs `cargo test --locked --workspace --release`. A changed upstream feed fails there (CHANGED), never on a PR. The m9_review Brașov tests now check the file against the manifest sha256 (`pinned_fixture`), closing the M9 backlog item; `sha2` 0.10 added as a rustline-core dev-dependency (Cargo.lock: one dependency line, no new crate).
+4. **Reruns.** No automatic retries. A failure that passes on a manual rerun is flaky: record it (run link) and fix the test or the limit; never add a retry loop.
+5. **Dependabot (step 7), state on 2026-10-23 (Leader ruling).** #3–#7 are closed; #8 (grouped cargo, 7 updates) and #2 (checkout 4 → 7) are open. `rustline-cli` `file_sha256` now hashes through `Digest::update`, which works with sha2 0.10 and 0.11 (the #8 compile error); not built against 0.11 yet. `osm_amplification::dense_nodes_with_10_million_entries_per_list` also failed on `main` (run 39405717253, rustc 1.99.1, heap peak 79 MiB vs 64 MiB); 70 local runs (rustc 1.99.0) all measured 48 MiB, so it is runner-dependent. Fix (Leader ruling): the test allocator counts per thread (thread-local `Cell<isize>`), so only the parsing thread's allocations count; limit stays 64 MiB; 5× debug + 5× release locally all 48 MiB. Likely cause: a process-wide count also saw other threads (unconfirmed, it never reproduced locally).
+6. **Local self-check only:** actionlint 1.7.12 and yamllint 1.38 (`.yamllint.yml`) pass; `act` not used (needs docker). The Done-when runs (green + intentionally red PR, wall time, cold cache) need a push.
+7. **flutter_rust_bridge upgrades are manual.** The crate, `flutter_rust_bridge_codegen` and the Dart package must move together with regenerated bindings, so `dependabot.yml` ignores the `flutter_rust_bridge` cargo crate. Pub is not a Dependabot ecosystem here, so the Dart package is never bumped by it. Upgrade all three by hand, regenerate, and let the `flutter` CI job's diff check prove it.
+
+### Progress
+- 2026-10-23 (Builder): workflows and script written, lint-clean; not pushed.
+- 2026-10-23 (Builder, Leader rulings): heap test counts per thread; checkout pinned to v7.0.1 everywhere; Dependabot ignores flutter_rust_bridge; `file_sha256` confirmed building on sha2 0.10.9. Open: CI badge + "which tests run where" in README (Leader), first pushed green/red runs.
+- **Backlog:** android-emulator.yml pushes no pack. A google-sample pack is not enough: the integration tests use fixed Brașov coordinates (`m6_adapter.dart` city box, `rustline_lifecycle_test.dart`), so pack tests would need a Brașov pack (no public pinned URL for brasov-manifest; brasov-latest is fetchable with its sha) or coordinates read from the pack.
 
 ---
 

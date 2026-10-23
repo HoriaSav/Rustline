@@ -1,0 +1,51 @@
+name: Real feeds
+
+# Plan M10 step 6 (decision 3): the required CI has no feeds (gitignored), so
+# real-feed tests skip there. This workflow fetches every fixture that has a
+# public URL with scripts/fetch-fixtures.sh, which checks the pinned sha256
+# from fixtures/manifest.tsv before any test reads a file, caches them by the
+# manifest hash, and runs the workspace tests with the feeds present.
+# Manual and weekly: upstream "latest" URLs change, and a changed feed must
+# fail here (CHANGED) instead of breaking PRs.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-feeds-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  real-feeds:
+    name: tests with real feeds
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: real-feeds
+      - name: Cache fixtures
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: fixtures/feeds
+          key: fixtures-${{ hashFiles('fixtures/manifest.tsv') }}
+      # Downloads what is missing, then verifies the sha256 of every file
+      # (cached ones included). Rows without a public URL are reported as
+      # SKIP; their tests skip.
+      - name: Fetch and verify fixtures
+        run: scripts/fetch-fixtures.sh --skip-manual
+      - name: Test (release)
+        run: cargo test --locked --workspace --release

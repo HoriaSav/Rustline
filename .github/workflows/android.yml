@@ -1,7 +1,7 @@
 name: Android
 
-# Cross-builds the FFI library for phones (plan M6 step 8): arm64-v8a only,
-# the ABI Rustline ships (x86_64 is for the emulator and built by Flutter).
+# Plan M10 step 3 (and M6 step 8): the FFI library for arm64-v8a (phones)
+# and x86_64 (emulator) with the MSRV toolchain, then the example release APK.
 on:
   push:
     branches: [main]
@@ -18,18 +18,36 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   NDK_VERSION: 26.1.10909125
+  FLUTTER_VERSION: 3.27.4
 
 jobs:
-  ffi-arm64:
-    name: cargo ndk arm64-v8a
+  ffi:
+    name: cargo ndk ${{ matrix.abi }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            target: aarch64-linux-android
+          - abi: x86_64
+            target: x86_64-linux-android
+    env:
+      # The MSRV, so the phone build proves 1.85 too (overrides
+      # rust-toolchain.toml, which says stable).
+      RUSTUP_TOOLCHAIN: "1.85"
     steps:
-      - uses: actions/checkout@v4
-      # The MSRV (workspace rust-version), so the phone build proves 1.85 too.
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          targets: aarch64-linux-android
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: "1.85"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: ndk-${{ matrix.abi }}
       - name: Install NDK
         run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
       - name: Install cargo-ndk
@@ -37,6 +55,60 @@ jobs:
       - name: Build
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-          cargo ndk -t arm64-v8a build --locked --release -p rustline-ffi
-      - name: Size
-        run: ls -l target/aarch64-linux-android/release/librustline_ffi.so
+          cargo ndk -t "${{ matrix.abi }}" build --locked --release -p rustline-ffi
+      - name: Size summary
+        run: |
+          so="target/${{ matrix.target }}/release/librustline_ffi.so"
+          bytes=$(stat -c %s "$so")
+          echo "| ABI | librustline_ffi.so |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ${{ matrix.abi }} | $bytes bytes ($((bytes / 1024)) KiB) |" >> "$GITHUB_STEP_SUMMARY"
+
+  apk:
+    name: flutter build apk --release (example)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: apk
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3  # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            rustline_flutter/example/android/*.gradle*
+            rustline_flutter/android/*.gradle*
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2  # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install NDK
+        run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+      # No --locked here: Flutter has no such flag and cargokit runs cargo
+      # itself. `pub get --enforce-lockfile` pins Dart; Cargo.lock is
+      # enforced by the --locked jobs (ci.yml, ffi above).
+      - name: Build APK
+        working-directory: rustline_flutter/example
+        run: |
+          flutter pub get --enforce-lockfile
+          flutter build apk --release
+      - name: Size summary
+        working-directory: rustline_flutter/example
+        run: |
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          {
+            echo "| File | Bytes |"
+            echo "|---|---|"
+            echo "| app-release.apk | $(stat -c %s "$apk") |"
+            unzip -l "$apk" 'lib/*/librustline_ffi.so' | awk '$4 ~ /\.so$/ {print "| " $4 " | " $1 " |"}'
+          } >> "$GITHUB_STEP_SUMMARY"
