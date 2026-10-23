@@ -2,7 +2,9 @@
   <img src="Documentation/images/rustline-logo.svg" alt="Rustline logo" width="600">
 </p>
 
-# Rustline
+# Rustline: offline GTFS journey planner (RAPTOR) in Rust + Flutter
+
+Rustline is an offline public transport trip planner and transit routing library in Rust: RAPTOR over GTFS + OpenStreetMap, with multiple journey options and a Flutter plugin.
 
 > An offline, on-device public-transport journey planner in Rust: it answers "I am at A at time T and want to get to B — what should I do?" from GTFS timetables and OpenStreetMap streets, without a server.
 
@@ -22,6 +24,7 @@
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Roadmap](#roadmap)
+- [Similar projects](#similar-projects)
 - [Contributing](#contributing)
 - [License](#license)
 - [Contact](#contact)
@@ -39,6 +42,7 @@ It is a standalone Rust library first; the RoTransit Flutter app (Brașov and ot
 - **GTFS ingest** — loads any GTFS feed (zip or directory) and prints counts, timezone, validity window, patterns and a validation report (`rustline inspect`, `--json` available).
 - **Reproducible routing packs** — `rustline build-pack` writes `rustline-{feedId}-{sha12}-v4.rlp` and `.rlp.zst`; `--built-at` / `SOURCE_DATE_EPOCH` gives byte-identical packs. Bad files return errors, never panic.
 - **RAPTOR stop-to-stop and door-to-door** — Pareto set on (arrival, rides), checked against a CSA oracle on 1 000 random queries per city.
+- **Multiple journey options (rRAPTOR)** — a departure window (depart-at) or arrival window (arrive-by) of up to 2 h returns up to 20 options, each tagged `Fastest`, `FewestTransfers` or `LeavesLatest`.
 - **Walking on real streets** — OSM foot graph, snapping (≤ 300 m), footpaths between stops (≤ 500 m), walk-only answers up to 3 km.
 - **Calendar and time edge cases** — service days D-1/D/D+1 across midnight, DST-aware (chrono-tz), `calendar_dates`, `frequencies.txt`, `transfers.txt` types 0–3, feed-expiry warnings.
 - **Flutter plugin** — `rustline_flutter` (flutter_rust_bridge 2.12.0) with stable error codes, safe atomic pack install, and a "newest search wins" planner; Android arm64-v8a and x86_64.
@@ -157,6 +161,9 @@ The output is shown under [Preview](#preview). Other commands:
 - `bbox` prints `min_lon,min_lat,max_lon,max_lat` (the order `osmium extract -b` takes).
 - Without `--osm` every walk is a straight line × 1.3 and `PackInfo::street_graph` is false.
 - `--arrive-by <time>` instead of `--at` (exactly one of the two): arrive by then, leaving as late as possible.
+- `--window <w>` (door-to-door only): plain seconds, or `30m` / `2h`; at most 2 h (7 200 s). With `--at` it searches every departure in `[at, at + w]`; with `--arrive-by` every arrival in `[deadline − w, deadline]`. Tags print after each itinerary, e.g. ` [fastest, leaves_latest]`.
+- `--max-results <n>` (door-to-door only): 1–20, default 5.
+- `--window` or `--max-results` with `--from-stop` / `--to-stop` is an error.
 - `--at`: an ambiguous local time (DST fall-back) takes the earlier instant; a time in the DST gap moves forward.
 
 ### Rust API (`rustline-core`)
@@ -188,10 +195,15 @@ for it in &resp.itineraries {
 
 API rules:
 
-- `PlanRequest { from, to, time: TimeSpec::DepartAt(..) | TimeSpec::ArriveBy(..), walk_speed_mps, max_access_m, max_transfer_m, max_transfers, max_results }`.
-- Limits (else `PlanError::InvalidRequest`): valid lat/lon; speed in (0, 3] m/s; `max_access_m` ≤ 3 000; `max_transfer_m` ≤ 500; `max_results` 1–255; `max_transfers` capped at 8.
+- `PlanRequest { from, to, time: TimeSpec::DepartAt(..) | TimeSpec::ArriveBy(..), walk_speed_mps, max_access_m, max_transfer_m, max_transfers, max_results, window_secs }`.
+- Limits (else `PlanError::InvalidRequest`): valid lat/lon; speed in (0, 3] m/s; `max_access_m` ≤ 3 000; `max_transfer_m` ≤ 500; `max_results` 1–20 (`MAX_RESULTS`, default 5); `max_transfers` ≤ 8 (`MAX_TRANSFERS`, default 3); `window_secs` ≤ 7 200 (`MAX_WINDOW_SECS`, default 0).
+- Breaking change (M9): `max_transfers` above 8 is now `InvalidRequest` (`invalid_request` over FFI); before M9 it was silently capped at 8.
+- `window_secs` (M9): 0 is a single instant (M8 behaviour). Depart-at returns journeys that leave the door in `[at, at + window_secs]`; arrive-by returns journeys that arrive in `[deadline − window_secs, deadline]`. If the window finds nothing, the answer for the instant itself is returned.
+- Range limit: one range search considers at most the 256 departures nearest the requested time (`MAX_RANGE_DEPARTURES`); arrive-by runs at most 256 searches stepping back from the deadline.
+- Results are the Pareto front on (arrival, rides). Order: with a window (`window_secs` > 0), sorted by door departure, then arrival; without one, depart-at is sorted by arrival, then fewer rides, and arrive-by by latest departure first, then fewer rides, less walking, earlier arrival. Over `max_results`, the fastest, the fewest-transfers and the leaves-latest itinerary are always kept (picked in the order fastest, fewest-transfers, leaves-latest for depart-at and leaves-latest, fewest-transfers, fastest for arrive-by, while `max_results` allows; so `max_results` 1 matches M8), then the rest fill the remaining slots: in order for depart-at, latest departure first for arrive-by. The kept itineraries keep that order.
+- `Itinerary::tags: Vec<Tag>` (ties get the tag too): `Tag::Fastest` (earliest arrival, in both depart-at and arrive-by), `Tag::FewestTransfers` (fewest transfers; walking only counts as 0), `Tag::LeavesLatest` (latest departure).
 - A point more than 300 m from every street → `OutsideCoverage`; a date outside the feed → `DateOutsideFeed`; nothing usable → `NoRoute`.
-- `PlanResponse { itineraries, warnings }`; `Itinerary { legs, departure, arrival, transfers, walk_m }` with times as `DateTime<FixedOffset>` in the feed's zone. Warnings include `StopNotLinkedToStreets`, `NoStreetGraph`, `FeedExpiresSoon` (≤ 14 days) and `ApproximateFrequencyTrip`.
+- `PlanResponse { itineraries, warnings }`; `Itinerary { legs, departure, arrival, transfers, walk_m, tags }` with times as `DateTime<FixedOffset>` in the feed's zone. Warnings include `StopNotLinkedToStreets`, `NoStreetGraph`, `FeedExpiresSoon` (≤ 14 days) and `ApproximateFrequencyTrip`.
 - `Engine::from_bytes`, `Engine::info() -> PackInfo` and `Engine::plan_stop_to_stop` are also available.
 - `rustline_osm::build_foot_graph(path, Option<BBox>)` / `build_foot_graph_with_limits(..., &OsmLimits)` (defaults: blobs ≤ 32 MiB, ≤ 8 M nodes, ≤ 1 M walkable ways).
 
@@ -212,16 +224,19 @@ final resp = await planner.plan(FfiPlanRequest(
   timeKind: FfiTimeKind.departAt, // or FfiTimeKind.arriveBy: timeMs is then the deadline
   timeMs: now.millisecondsSinceEpoch,
   timeOffsetSecs: now.timeZoneOffset.inSeconds,
-  maxResults: 5,
+  maxResults: 5, // 1–20
+  windowSecs: 1800, // optional (M9): null or 0 = one instant, at most 7200
 ));
 if (resp == null) return; // superseded by a newer search
 for (final it in resp.itineraries) {
-  print('${it.transfers} transfer(s), ${it.walkM} m walking, ${it.legs.length} legs');
+  print('${it.transfers} transfer(s), ${it.walkM} m walking, ${it.legs.length} legs, ${it.tags}');
 }
 planner.cancel(); // e.g. when leaving the screen
 ```
 
 - Every Rust error arrives as `RustlineException { code, message }` with a stable `code`: `invalid_request`, `outside_coverage`, `no_route`, `date_outside_feed`, `pack_corrupt`, `pack_version`, `pack_missing`, `pack_io`, `pack_too_large`, `no_space`, `internal`.
+- `FfiPlanRequest.windowSecs` (`int?`) is the departure window (arrive-by: arrival window); `maxResults` is 1–20; `maxTransfers` above 8 is `invalid_request`.
+- `FfiItinerary.tags` is a `List<FfiTag>`: `FfiTag.fastest`, `FfiTag.fewestTransfers`, `FfiTag.leavesLatest` (same meaning as `Tag` in Rust; `fastest` is the earliest arrival in both modes).
 - `RustlinePlanner`: the newest search wins; a superseded one resolves to `null`. Each Rust call is bounded (≤ 1 s).
 - Host (desktop) runs load the library explicitly: `RustLib.init(externalLibrary: ExternalLibrary.open('target/release/librustline_ffi.so'))`.
 
@@ -306,8 +321,8 @@ GitHub Actions: `ci.yml` (fmt, clippy, test), `android.yml` (`cargo ndk` arm64-v
 - [x] M5 — Calendar & edge cases: midnight, DST, holidays, frequencies, transfers.txt, benchmarks
 - [x] M6 — Flutter integration: plugin + Android build (engine ready, not yet wired into RoTransit)
 - [ ] M7 — Cleanup: M1 Known gaps #1–3, #5, #6 + M6 Reviewer leftovers *(built, in review)*
-- [ ] M8 — Arrive-by: "be there by 09:00" (reverse RAPTOR)
-- [ ] M9 — rRAPTOR options: Pareto (arrival vs transfers) + departure-window range queries
+- [x] M8 — Arrive-by: "be there by 09:00" (reverse RAPTOR)
+- [x] M9 — rRAPTOR options: Pareto (arrival vs transfers) + departure-window range queries
 - [ ] M10 — GitHub CI: fmt, clippy, tests debug+release, Flutter tests, Android build
 - [ ] M11 — iOS build: xcframework + Cargokit iOS on GitHub macOS runners
 - [ ] M12 — Server (optional): same engine behind `POST /v1/plan`
@@ -363,6 +378,15 @@ GitHub Actions: `ci.yml` (fmt, clippy, test), `android.yml` (`cargo ndk` arm64-v
 
 29. **Zip decompressed size** – `build-pack` streams trips.txt and stop_times.txt out of the zip without a cap on decompressed bytes or rows, so a zip bomb can grow memory (as before M7; desktop tool only).
 30. **trips.txt read twice** – `gtfs-structures` 0.48 always parses trips.txt in raw mode before Rustline's reader replaces it; its API has no switch to skip it.
+
+## Similar projects
+
+- [OpenTripPlanner](https://www.opentripplanner.org/), a multimodal trip planner in Java that runs as a server.
+- [MOTIS](https://github.com/motis-project/motis), an intermodal routing and timetable platform in C++ that runs as a server.
+- [Navitia](https://github.com/hove-io/navitia), an open-source journey planning and transit data API that runs as a hosted service.
+- [r5](https://github.com/conveyal/r5), Conveyal's RAPTOR-based routing engine in Java for transport network analysis.
+
+These engines run on servers. Rustline is a library that runs on the device: it plans trips offline from a pack on the phone and plugs into mobile apps through its Flutter plugin.
 
 ## Contributing
 
