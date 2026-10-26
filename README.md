@@ -80,7 +80,7 @@ Rustline uses flutter_rust_bridge 2.13.0 (Rust crate, Dart package and codegen; 
 ### Prerequisites
 
 - [rustup](https://rustup.rs) (the toolchain in `rust-toolchain.toml`, including the Android targets `aarch64-linux-android` and `x86_64-linux-android`, installs itself on first use)
-- For Android: `cargo install cargo-ndk` and Android NDK 26.1.10909125
+- For Android: `cargo install cargo-ndk`, Android NDK 26.1.10909125 and JDK 17 (the example app builds with Java 17)
 - For the Flutter plugin: Flutter 3.47.8 and `flutter_rust_bridge_codegen` 2.13.0
 
 ### Installation
