@@ -11,7 +11,7 @@ Rustline is an offline public transport trip planner and transit routing library
 [![CI](https://github.com/HoriaSav/Rustline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/HoriaSav/Rustline/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-in%20development-yellow)
-![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
+![Rust](https://img.shields.io/badge/rust-1.88%2B-orange)
 
 ## Table of Contents
 
@@ -47,7 +47,7 @@ It is a standalone Rust library first; the RoTransit Flutter app (Brașov and ot
 - **Multiple journey options (rRAPTOR)** — a departure window (depart-at) or arrival window (arrive-by) of up to 2 h returns up to 20 options, each tagged `Fastest`, `FewestTransfers` or `LeavesLatest`.
 - **Walking on real streets** — OSM foot graph, snapping (≤ 300 m), footpaths between stops (≤ 500 m), walk-only answers up to 3 km.
 - **Calendar and time edge cases** — service days D-1/D/D+1 across midnight, DST-aware (chrono-tz), `calendar_dates`, `frequencies.txt`, `transfers.txt` types 0–3, feed-expiry warnings.
-- **Flutter plugin** — `rustline_flutter` (flutter_rust_bridge 2.12.0) with stable error codes, safe atomic pack install, and a "newest search wins" planner; Android arm64-v8a and x86_64.
+- **Flutter plugin** — `rustline_flutter` (flutter_rust_bridge 2.13.0) with stable error codes, safe atomic pack install, and a "newest search wins" planner; Android arm64-v8a and x86_64.
 
 ## Preview
 
@@ -68,12 +68,12 @@ Real output of `rustline plan` on the Brașov pack:
 
 | Category | Technology |
 |----------|------------|
-| Language | Rust (stable, MSRV 1.85, pinned in `rust-toolchain.toml`); Dart for the plugin |
-| Framework | flutter_rust_bridge **2.12.0** + Cargokit (Flutter plugin) |
+| Language | Rust (stable, pinned in `rust-toolchain.toml`; MSRV 1.88, `rust-version` in `Cargo.toml`); Dart for the plugin |
+| Framework | flutter_rust_bridge **2.13.0** + Cargokit (Flutter plugin) |
 | Data | GTFS feeds, OpenStreetMap `.osm.pbf` extracts, own binary pack format v4 (zstd-compressed) |
 | Tools | Cargo workspace, criterion benchmarks, chrono / chrono-tz, `cargo-ndk` 4.1.2, Android NDK 26.1.10909125, GitHub Actions |
 
-flutter_rust_bridge stays on 2.12.0: 2.13.x needs Dart ≥ 3.9.2 and RoTransit is on Flutter 3.27 (Dart 3.6). Codegen and Dart package versions must match.
+Rustline uses flutter_rust_bridge 2.13.0 (Rust crate, Dart package and codegen; the three versions must match) and is built and tested with Flutter 3.47.8. An app using the plugin needs Flutter 3.35.3 or newer (Dart ≥ 3.9.2), as set in `rustline_flutter/pubspec.yaml`; RoTransit (Flutter 3.27, Dart 3.6) has to upgrade Flutter before it can use this version.
 
 ## Getting Started
 
@@ -81,7 +81,7 @@ flutter_rust_bridge stays on 2.12.0: 2.13.x needs Dart ≥ 3.9.2 and RoTransit i
 
 - [rustup](https://rustup.rs) (the toolchain in `rust-toolchain.toml`, including the Android targets `aarch64-linux-android` and `x86_64-linux-android`, installs itself on first use)
 - For Android: `cargo install cargo-ndk` and Android NDK 26.1.10909125
-- For the Flutter plugin: Flutter 3.27 and `flutter_rust_bridge_codegen` 2.12.0
+- For the Flutter plugin: Flutter 3.47.8 and `flutter_rust_bridge_codegen` 2.13.0
 
 ### Installation
 
@@ -319,15 +319,15 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Runs on | Jobs |
 |---|---|---|
-| `ci.yml` (CI) | push to `main`, every pull request, manual | `rust`: `cargo fmt --check`, `clippy -D warnings`, tests debug + release (stable); `msrv`: tests on Rust 1.85; `flutter`: `flutter analyze` (plugin + example), plugin `flutter test`, and a check that `flutter_rust_bridge_codegen generate` (2.12.0) leaves no diff |
-| `android.yml` (Android) | push to `main`, every pull request, manual | `ffi`: `cargo ndk` release build of `rustline-ffi` for arm64-v8a and x86_64 on Rust 1.85, `.so` size in the job summary; `apk`: example `flutter build apk --release`, APK and `.so` sizes in the summary |
+| `ci.yml` (CI) | push to `main`, every pull request, manual | `rust`: `cargo fmt --check`, `clippy -D warnings`, tests debug + release (stable); `msrv`: tests on Rust 1.88; `flutter`: `flutter analyze` (plugin + example), plugin `flutter test`, and a check that `flutter_rust_bridge_codegen generate` (2.13.0) leaves no diff |
+| `android.yml` (Android) | push to `main`, every pull request, manual | `ffi`: `cargo ndk` release build of `rustline-ffi` for arm64-v8a and x86_64 on Rust 1.88, `.so` size in the job summary; `apk`: example `flutter build apk --release`, APK and `.so` sizes in the summary |
 | `android-emulator.yml` | manual only | example `integration_test` on an x86_64 API 34 emulator; pack-based tests print `skip:` (no pack) |
 | `real-feeds.yml` | manual, and Mondays 04:00 UTC | fetches and verifies real feeds, then `cargo test --workspace --release` with them present |
 | `bench.yml` | manual only | `cargo bench -p rustline-core --bench plan` (spot checks; shared runners are noisy) |
 
 - Pull requests use the read-only `GITHUB_TOKEN` and no secrets (`pull_request`, not `pull_request_target`). Failed runs are not retried automatically.
 - `fixtures/feeds/` is git-ignored, so in `ci.yml` the real-feed tests skip. `scripts/fetch-fixtures.sh` downloads missing files listed in `fixtures/manifest.tsv` and checks each against its pinned sha256. A changed upstream file is saved as `<file>.new` and fails (`CHANGED`). `--verify` only checks; `--skip-manual` reports files without a public URL as `SKIP` (used by `real-feeds.yml` and `bench.yml`). `real-feeds.yml` caches the feeds keyed by the manifest hash.
-- Dependabot (`.github/dependabot.yml`) opens one grouped PR per week each for Cargo and GitHub Actions (at most 5 open). Ignored: `flutter_rust_bridge` (upgraded by hand with the codegen, the Dart package and the regenerated bindings), `gtfs-structures` ≥ 0.49 (needs Rust newer than the 1.85 MSRV) and `dtolnay/rust-toolchain` (pinned to a commit).
+- Dependabot (`.github/dependabot.yml`) opens one grouped PR per week each for Cargo and GitHub Actions (at most 5 open). `gtfs-structures` is excluded from the Cargo group and gets its own PR, because its 0.x bumps change the API (it is pinned with `=`). Ignored: `flutter_rust_bridge` (upgraded by hand with the codegen, the Dart package and the regenerated bindings) and `dtolnay/rust-toolchain` (pinned to a commit).
 
 ## Roadmap
 
@@ -395,7 +395,11 @@ GitHub Actions workflows in `.github/workflows/`:
 **M7**
 
 29. **Zip decompressed size** – `build-pack` streams trips.txt and stop_times.txt out of the zip without a cap on decompressed bytes or rows, so a zip bomb can grow memory (as before M7; desktop tool only).
-30. **trips.txt read twice** – `gtfs-structures` 0.48 always parses trips.txt in raw mode before Rustline's reader replaces it; its API has no switch to skip it.
+30. **trips.txt read twice** – `gtfs-structures` 0.52 always parses trips.txt in raw mode before Rustline's reader replaces it; its API has no switch to skip it.
+
+**gtfs-structures 0.52**
+
+31. **Uncapped feed files** – `gtfs-structures` 0.52 caps none of the files it reads: agency.txt, routes.txt, stops.txt, trips.txt, calendar.txt, calendar_dates.txt, shapes.txt, fare_attributes.txt, fare_rules.txt, frequencies.txt, transfers.txt, pathways.txt, feed_info.txt, translations.txt, levels.txt (new in 0.52), attributions.txt (since 0.50) and licenses.txt (since 0.51), plus the newer fare and ticketing files (fare_products.txt, fare_media.txt, rider_categories.txt, ticketing_*.txt), are each parsed whole, with no cap on bytes or rows, so a huge or zip-bombed file can grow memory (desktop tool only). stop_times.txt is turned off there (Rustline streams it itself; see #29). Rustline's own cap covers only transfers.txt (256 MiB, `load.rs`). levels.txt is still read and parsed, then dropped (`raw.levels = None` in `rustline-gtfs` `load.rs`): Rustline does not use it, and a bad row there no longer fails the build.
 
 ## Similar projects
 
