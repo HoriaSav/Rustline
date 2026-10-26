@@ -392,10 +392,13 @@ fn build_routes(feed: &RawFeed) -> (Vec<Route>, HashMap<&str, RouteIdx>) {
 
 /// The GTFS integer for a route type.
 ///
-/// The parser folds extended types into their family (e.g. 700–799 → bus),
-/// so the exact extended code is not preserved.
+/// Extended types are folded into their family (e.g. 700–799 → bus), so the
+/// exact extended code is not preserved. gtfs-structures did this folding
+/// itself up to 0.48; since 0.49 it keeps the code as
+/// `RouteType::Extended(ExtendedRouteType)`, and the same table is applied
+/// here so packs stay byte-identical.
 fn route_type_code(t: RouteType) -> i16 {
-    match t {
+    let code = match t {
         RouteType::Tramway => 0,
         RouteType::Subway => 1,
         RouteType::Rail => 2,
@@ -404,11 +407,33 @@ fn route_type_code(t: RouteType) -> i16 {
         RouteType::CableCar => 5,
         RouteType::Gondola => 6,
         RouteType::Funicular => 7,
-        RouteType::Coach => 200,
-        RouteType::Air => 1100,
-        RouteType::Taxi => 1500,
+        // Exact: `ExtendedRouteType` is a fieldless `#[repr(i16)]` enum whose
+        // discriminants are the GTFS codes.
+        RouteType::Extended(e) => e as i16,
         RouteType::Other(n) => n,
+    };
+    match (code, code / 100) {
+        (0, _) | (_, 9) => 0,
+        (1, _) | (_, 4) => 1,
+        (2, _) | (_, 1) => 2,
+        (3, _) | (_, 7) | (_, 8) => 3,
+        (4, _) | (_, 10) | (_, 12) => 4,
+        (5, _) => 5,
+        (6, _) | (_, 13) => 6,
+        (7, _) | (_, 14) => 7,
+        (_, 2) => 200,
+        (_, 11) => 1100,
+        (_, 15) => 1500,
+        _ => code,
     }
+}
+
+/// A gtfs-structures date (jiff since 0.50) as a chrono date. The crate does
+/// not re-export jiff, so the parts come in as numbers.
+fn chrono_date(year: i16, month: i8, day: i8) -> Date {
+    // Every jiff civil date (years -9999..=9999) exists in chrono, and jiff
+    // keeps month in 1..=12 and day in 1..=31, so the casts cannot wrap.
+    Date::from_ymd_opt(year.into(), month as u32, day as u32).expect("valid civil date")
 }
 
 /// Services from calendar.txt and calendar_dates.txt, sorted by id.
@@ -447,7 +472,14 @@ fn build_services<'a>(
                         report.add(IssueKind::EmptyDateRange, 1, *id);
                         None
                     } else {
-                        Some((c.start_date, c.end_date))
+                        Some((
+                            chrono_date(
+                                c.start_date.year(),
+                                c.start_date.month(),
+                                c.start_date.day(),
+                            ),
+                            chrono_date(c.end_date.year(), c.end_date.month(), c.end_date.day()),
+                        ))
                     },
                 ),
                 None => ([false; 7], None),
@@ -455,8 +487,12 @@ fn build_services<'a>(
             let (mut added, mut removed) = (Vec::new(), Vec::new());
             for d in g.calendar_dates.get(*id).into_iter().flatten() {
                 match d.exception_type {
-                    Exception::Added => added.push(d.date),
-                    Exception::Deleted => removed.push(d.date),
+                    Exception::Added => {
+                        added.push(chrono_date(d.date.year(), d.date.month(), d.date.day()))
+                    }
+                    Exception::Deleted => {
+                        removed.push(chrono_date(d.date.year(), d.date.month(), d.date.day()))
+                    }
                 }
             }
             added.sort();

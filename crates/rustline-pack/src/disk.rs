@@ -253,7 +253,7 @@ pub(crate) fn check_body(
     // range: size and alignment of the root, a few hundred bytes.
     let size = std::mem::size_of::<ArchivedTimetableData>() as u64;
     let align = std::mem::align_of::<ArchivedTimetableData>() as u64;
-    if len < size || (len - size) % align != 0 {
+    if len < size || !(len - size).is_multiple_of(align) {
         return Err(corrupt("no room for the root"));
     }
     let root = len - size;
@@ -294,7 +294,7 @@ pub(crate) fn check_body(
 fn place(pos: i64, bytes: u64, align: u64, lo: u64, hi: u64) -> Option<u64> {
     let p = u64::try_from(pos).ok()?;
     let end = p.checked_add(bytes)?;
-    (p >= lo && p % align == 0 && end <= hi).then_some(p)
+    (p >= lo && p.is_multiple_of(align) && end <= hi).then_some(p)
 }
 
 /// Checks string entry `k` at `at`; its bytes, when out of line, must sit in

@@ -563,3 +563,35 @@ fn duplicate_transfer_rows_are_counted_and_one_is_kept() {
     let kept: Vec<(u8, u32)> = tt.transfers.iter().map(|t| (t.kind, t.min_secs)).collect();
     assert_eq!(kept, [(2, 120), (2, 90), (3, 30)]);
 }
+
+/// The pack bytes of a feed (fixed header fields, so they are reproducible).
+fn pack_bytes(feed: &TempFeed) -> Vec<u8> {
+    let (tt, _) = build(feed);
+    let meta = rustline_gtfs::pack_meta(&tt, [0; 32], "edge", 0);
+    let data = rustline_gtfs::try_timetable_data(&tt).expect("pack arrays");
+    let mut out = Vec::new();
+    rustline_pack::write_pack(&data, &meta, &mut out).expect("write pack");
+    out
+}
+
+#[test]
+fn bad_levels_row_is_ignored_and_the_pack_is_unchanged() {
+    // gtfs-structures 0.52 parses levels.txt and fails the whole feed on one
+    // bad row (`level_index` is a required float). Rustline does not use levels.
+    let files = |levels: &'static str| {
+        TempFeed::new(&[
+            ("trips.txt", &trips(&["T"])),
+            (
+                "stop_times.txt",
+                &stop_times(&[
+                    ("T", "08:00:00", "08:00:00", "A", 1),
+                    ("T", "08:05:00", "08:05:00", "B", 2),
+                ]),
+            ),
+            ("levels.txt", levels),
+        ])
+    };
+    let without = pack_bytes(&files(""));
+    let with_bad = pack_bytes(&files("level_id,level_index\nL1,\n"));
+    assert_eq!(with_bad, without);
+}

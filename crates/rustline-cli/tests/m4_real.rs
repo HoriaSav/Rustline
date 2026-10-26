@@ -130,7 +130,7 @@ fn brasov_garbage_coordinates() {
     let e = engine(&p.pack);
     let mut rng = Rng(0x4D34_6A4B_B5A0);
     let mut worst = Duration::ZERO;
-    for i in 0..1000 {
+    for i in 0..1000u32 {
         let mut pt = near_random_stop(&e, &mut rng, 2000.0);
         match i % 5 {
             0 => pt.0 = f64::NAN,
@@ -139,7 +139,11 @@ fn brasov_garbage_coordinates() {
             _ => {}
         }
         let other = near_random_stop(&e, &mut rng, 2000.0);
-        let (a, b) = if i % 2 == 0 { (pt, other) } else { (other, pt) };
+        let (a, b) = if i.is_multiple_of(2) {
+            (pt, other)
+        } else {
+            (other, pt)
+        };
         let t0 = Instant::now();
         let _ = e.plan(&req(a, b, random_departure(&e, &mut rng)));
         worst = worst.max(t0.elapsed());

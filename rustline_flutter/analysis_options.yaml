@@ -1,3 +1,9 @@
+# Added by `flutter pub get` (Flutter 3.47+), which re-adds it if removed:
+# keep it so CI's pub get leaves the tree clean. android/ has no Dart files.
+analyzer:
+  exclude:
+    - build/**
+    - android/**
 include: package:flutter_lints/flutter.yaml
 
 # Additional information about this file can be found at

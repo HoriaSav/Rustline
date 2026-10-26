@@ -76,9 +76,9 @@ Learned from the M0/M1 reviews. Every item is checked by Tester/Reviewer; skippi
 - Check: `rg -n -i 'brasov|brașov|ratbv|bucharest|europe/|45\.6|25\.5' crates/*/src` returns nothing.
 
 **2. Toolchain**
-- MSRV is **1.85** (`rust-version` in the workspace). Before adding or bumping a dependency, check its own `rust-version`; if a newer version needs more, pin the last compatible one with a comment and a Dependabot `ignore` for the incompatible range.
+- MSRV is **1.88** (`rust-version` in the workspace; raised from 1.85 on 2026-10-26 because zip 8.6 needs 1.88). Before adding or bumping a dependency, check its own `rust-version`; if a newer version needs more, pin the last compatible one with a comment and a Dependabot `ignore` for the incompatible range.
 - Every cargo command in code, docs and CI uses `--locked` (except `cargo fmt`, which has no such flag). `Cargo.lock` is committed.
-- Check: `cargo +1.85 test --locked --workspace` passes.
+- Check: `cargo +1.88 test --locked --workspace` passes.
 
 **3. No panics on bad input**
 - Anything read from disk or the user (GTFS, OSM, `.rlp`, CLI args, FFI calls) returns `Result<_, SpecificError>` (`thiserror`). No `unwrap`/`expect`/`panic!`/indexing that can go out of bounds on input data. `unwrap` only on invariants you create yourself, with a comment saying why.
@@ -473,7 +473,7 @@ impl Engine { pub fn open(path: &Path) -> Result<Engine, PackError>; pub fn from
 - [ ] **Reproducible:** building the same feed twice gives byte-identical `.rlp` (only `built_at` may differ; put it in a fixed place or allow `--built-at` / `SOURCE_DATE_EPOCH`). Test compares the sha256 of two builds.
 - [ ] `read_pack` validates every CSR offset (monotonic, last == array length, every index < its table length) and returns `Corrupt` instead of indexing out of bounds.
 - [ ] Brașov: pack build < 60 s, `.rlp` size, `.zst` size and `Engine::from_bytes` time (median of 10, release) written into spec §7.5 with the command used.
-- [ ] Format decision (rkyv vs bytemuck) written into spec §7.5 with numbers. The chosen crates satisfy MSRV 1.85.
+- [ ] Format decision (rkyv vs bytemuck) written into spec §7.5 with numbers. The chosen crates satisfy the MSRV (1.85 at M2, 1.88 since 2026-10-26).
 - [ ] `rustline inspect` on a `.rlp` prints `PackInfo` (counts, sha, validity, timezone, format version); `--json` works.
 - [ ] M1 Known gaps #1, #2, #3, #5, #6 (own lenient reader) either fixed here or explicitly re-targeted in README.
 
@@ -664,7 +664,7 @@ osmium extract -b 25.45,45.58,25.72,45.72 data/raw/romania.osm.pbf -o data/raw/b
 - *Why:* the whole country is ~250 MB; Brașov alone is a few MB and builds in seconds.
 
 **2. Parse walkable ways (`rustline-osm`)**
-- *Built (Leader/Builder decision, M4):* no `osmpbf`. A small hand-written reader (`rustline-osm/src/pbf.rs`, only `flate2` for zlib) reads nodes and ways in one pass (nodes must come first, as in sorted extracts). Why: every size from the file is checked against `OsmLimits` before use (blob ≤ 32 MiB, lists ≤ `max_blob_bytes / 64` items, node/way counts), no allocation is sized from a header, and it builds on MSRV 1.85 with few dependencies. Fuzzed in debug and release (Tester `m4_osm_fuzz`, Reviewer R28: 16 000 mutations, 0 panics).
+- *Built (Leader/Builder decision, M4):* no `osmpbf`. A small hand-written reader (`rustline-osm/src/pbf.rs`, only `flate2` for zlib) reads nodes and ways in one pass (nodes must come first, as in sorted extracts). Why: every size from the file is checked against `OsmLimits` before use (blob ≤ 32 MiB, lists ≤ `max_blob_bytes / 64` items, node/way counts), no allocation is sized from a header, and it builds on the MSRV (1.88) with few dependencies. Fuzzed in debug and release (Tester `m4_osm_fuzz`, Reviewer R28: 16 000 mutations, 0 panics).
 - *How (as planned):* `osmpbf` crate, two passes: ways with a walkable `highway` tag (list in spec §7.3) and not `foot=no`/`access=private`; then the nodes they use. Output `FootGraph { node_coords: Vec<LatLon>, edges_start: Vec<u32>, edge_to: Vec<u32>, edge_len_m: Vec<f32>, edge_kind: Vec<u8> }` (CSR, both directions).
 - *Why:* pedestrians walk both ways on every street, so edges are added twice. CSR again for speed and easy saving.
 
@@ -980,7 +980,7 @@ Airplane mode on → plan a journey → it still works.
 ### Definition of done (strict)
 
 **Interfaces**
-- `rustline-ffi` depends on `flutter_rust_bridge = "=2.12.0"`; Dart package and codegen also 2.12.0 (RoTransit is on Dart 3.6).
+- `rustline-ffi` depends on `flutter_rust_bridge = "=2.12.0"`; Dart package and codegen also 2.12.0 (RoTransit is on Dart 3.6). *Since 2026-10-26 all three are 2.13.0 on Flutter 3.47.8 (decision 8 of M10).*
 - FFI types are plain data (`String`, `f64`, `i64`, `Vec`, enums); no `rustline_core` type crosses the bridge. Times cross as epoch millis + offset seconds.
 - Errors cross as a Dart exception with a stable code (`invalid_request`, `outside_coverage`, `no_route`, `date_outside_feed`, `pack_corrupt`, `pack_version`).
 
@@ -1223,7 +1223,7 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 **Prerequisites:** M7 (can run in parallel with M8/M9).
 
 ### Steps
-1. Extend `.github/workflows/ci.yml` (Ubuntu): `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo test --locked --workspace` in **debug and release**; MSRV job with Rust 1.85.
+1. Extend `.github/workflows/ci.yml` (Ubuntu): `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo test --locked --workspace` in **debug and release**; MSRV job with Rust 1.88 (was 1.85 until 2026-10-26).
 2. Flutter job: pinned Flutter version, `flutter analyze` and `flutter test` in `rustline_flutter` and `rustline_flutter/example`; check generated FRB code is up to date (`flutter_rust_bridge_codegen generate` then `git diff --exit-code`).
 3. Android job (`android.yml`): `cargo ndk` for arm64-v8a + x86_64 with NDK 26.1.10909125, `flutter build apk --release` of the example; upload `.so` sizes as a job summary.
 4. Optional emulator job: integration test on an x86_64 emulator (reactivecircus/android-emulator-runner), allowed to be a separate workflow if slow.
@@ -1254,13 +1254,15 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 **Time (est.):** 2–4 evenings. (Pushing workflows needs Savin's "push".)
 
 ### Decisions (Builder, 2026-10-23)
-1. **Workflows.** `ci.yml` (required): `rust` (fmt, clippy, test debug + release on stable), `msrv` (`cargo +1.85 test --locked --workspace`, `RUSTUP_TOOLCHAIN=1.85` because `rust-toolchain.toml` says stable), `flutter` (Flutter 3.27.4: `pub get --enforce-lockfile`, `flutter analyze` in the plugin and the example, `flutter test` in the plugin, then `flutter_rust_bridge_codegen` 2.12.0 `generate` + `git diff --exit-code`). `android.yml` (required): `cargo ndk` arm64-v8a + x86_64 on 1.85 with NDK 26.1.10909125 and `.so` sizes in the job summary, and `flutter build apk --release` of the example with APK/`.so` sizes. `android-emulator.yml` (manual, step 4) and `real-feeds.yml` (manual + weekly, step 6) are not required checks. `bench.yml` stays manual.
+1. **Workflows.** `ci.yml` (required): `rust` (fmt, clippy, test debug + release on stable), `msrv` (`cargo +1.88 test --locked --workspace`, `RUSTUP_TOOLCHAIN=1.88` because `rust-toolchain.toml` says stable), `flutter` (Flutter 3.47.8: `pub get --enforce-lockfile`, `flutter analyze` in the plugin and the example, `flutter test` in the plugin, then `flutter_rust_bridge_codegen` 2.13.0 `generate` + `git diff --exit-code`). `android.yml` (required): `cargo ndk` arm64-v8a + x86_64 on 1.88 with NDK 26.1.10909125 and `.so` sizes in the job summary, and `flutter build apk --release` of the example with APK/`.so` sizes. `android-emulator.yml` (manual, step 4) and `real-feeds.yml` (manual + weekly, step 6) are not required checks. `bench.yml` stays manual.
 2. **Hardening (step 5).** Every action pinned to a commit sha with the tag as a comment (`actions/checkout` v7.0.1 = `3d3c42e5aac5ba805825da76410c181273ba90b1`, from `git ls-remote`; this replaces Dependabot #2) (Dependabot updates both; `dtolnay/rust-toolchain` stays ignored and gets the toolchain via `with: toolchain`). `permissions: contents: read`, `concurrency` cancel-in-progress and `timeout-minutes` on every job. Only `pull_request` triggers (no `pull_request_target`), so PR jobs have no secrets and fork runs cannot write. Caches: `Swatinem/rust-cache` (one key per job), Gradle via `setup-java`, pub via `flutter-action`.
 3. **Real feeds (step 6).** Required CI has no feeds: real-feed tests skip (missing file) or stay `#[ignore]`, as today. `real-feeds.yml` runs `scripts/fetch-fixtures.sh --skip-manual` (new flag: rows without a public URL, e.g. `brasov-manifest`, are SKIP instead of a failure), which verifies every file's manifest sha256 before the tests, caches `fixtures/feeds` by the manifest hash, then runs `cargo test --locked --workspace --release`. A changed upstream feed fails there (CHANGED), never on a PR. The m9_review Brașov tests now check the file against the manifest sha256 (`pinned_fixture`), closing the M9 backlog item; `sha2` 0.10 added as a rustline-core dev-dependency (Cargo.lock: one dependency line, no new crate).
 4. **Reruns.** No automatic retries. A failure that passes on a manual rerun is flaky: record it (run link) and fix the test or the limit; never add a retry loop.
 5. **Dependabot (step 7), state on 2026-10-23 (Leader ruling).** #3–#7 are closed; #8 (grouped cargo, 7 updates) and #2 (checkout 4 → 7) are open. `rustline-cli` `file_sha256` now hashes through `Digest::update`, which works with sha2 0.10 and 0.11 (the #8 compile error); not built against 0.11 yet. `osm_amplification::dense_nodes_with_10_million_entries_per_list` also failed on `main` (run 39405717253, rustc 1.99.1, heap peak 79 MiB vs 64 MiB); 70 local runs (rustc 1.99.0) all measured 48 MiB, so it is runner-dependent. Fix (Leader ruling): the test allocator counts per thread (thread-local `Cell<isize>`), so only the parsing thread's allocations count; limit stays 64 MiB; 5× debug + 5× release locally all 48 MiB. Likely cause: a process-wide count also saw other threads (unconfirmed, it never reproduced locally).
 6. **Local self-check only:** actionlint 1.7.12 and yamllint 1.38 (`.yamllint.yml`) pass; `act` not used (needs docker). The Done-when runs (green + intentionally red PR, wall time, cold cache) need a push.
 7. **flutter_rust_bridge upgrades are manual.** The crate, `flutter_rust_bridge_codegen` and the Dart package must move together with regenerated bindings, so `dependabot.yml` ignores the `flutter_rust_bridge` cargo crate. Pub is not a Dependabot ecosystem here, so the Dart package is never bumped by it. Upgrade all three by hand, regenerate, and let the `flutter` CI job's diff check prove it.
+
+8. **Dependency update 2026-10-26 (Dependabot #12, Savin).** sha2 0.11, zstd 0.14, criterion 0.7, libc 0.2.191, gtfs-structures 0.48.2 (then 0.52.0, below), zip 8.6, crc32fast 1.5.3. MSRV 1.85 → **1.88** (zip 8.6.0 `rust-version = "1.88"`; per `cargo metadata` the next highest declared `rust-version` is 1.85, and 43 locked crates, gtfs-structures among them, declare none, so the `msrv` job's `cargo +1.88 check --locked` is what proves 1.88), in the workspace, the `msrv` job and the Android `ffi` jobs. cargo-ndk 4.1.2 (needs 1.86) now builds on the MSRV, so the stable workaround is gone. Dependabot no longer ignores gtfs-structures; it gets its own PR (excluded from the `cargo` group) because 0.x bumps change its API. The Dart flutter_rust_bridge 2.13.0 needs Dart ≥ 3.9.2, so Savin chose to upgrade Flutter: CI and local Flutter **3.47.8** (Dart 3.13.7), flutter_rust_bridge **2.13.0** in the crate, the Dart package and the codegen (bindings regenerated, decision 7). RoTransit (Flutter 3.27 / Dart 3.6) cannot use this plugin version until it upgrades Flutter too. gtfs-structures **=0.52.0**: since 0.49 it keeps extended route types (`build.rs` applies the old folding table, so packs are unchanged) and since 0.50 its dates are jiff (converted to chrono in `build.rs`). Since 0.52 one bad levels.txt row fails the whole feed, so `load.rs` drops levels like transfers. Known gap: gtfs-structures reads levels.txt (0.52), attributions.txt (0.50) and licenses.txt (0.51) with no size cap before Rustline drops or ignores them, as it does every file it parses; only trips.txt, stop_times.txt (own reader, row cap) and transfers.txt (256 MiB) have Rustline caps.
 
 ### Progress
 - 2026-10-23 (Builder): workflows and script written, lint-clean; not pushed.
@@ -1326,7 +1328,7 @@ curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
 - [ ] Every request body validated; malformed JSON → 400 with `{"error": ...}`, never 500 or a panic. Body size limit set.
 - [ ] Test: for every golden query, server JSON == `Engine::plan` serialised (byte-equal).
 - [ ] Plan runs in `spawn_blocking`; 100 concurrent requests in a test complete without errors.
-- [ ] Deps (axum, tokio, schemars) satisfy MSRV 1.85 or the MSRV bump is agreed with Savin first.
+- [ ] Deps (axum, tokio, schemars) satisfy MSRV 1.88 or the MSRV bump is agreed with Savin first.
 - [ ] Safety (§11): request body cap (e.g. 64 KiB), per-request time limit (plan in `spawn_blocking` with a timeout), concurrency limit; peak RSS under 100 concurrent requests on the MBTA pack recorded.
 - [ ] All items in **Edge cases (must be tested)** below have a test.
 - **Edge cases (must be tested):** empty body; body over the cap; wrong `content-type`; NaN/huge numbers in JSON; unknown fields; date string without offset; slow client (slowloris) → timeout; 100 concurrent requests; client disconnect mid-plan; pack file missing at startup → clear exit, not a panic; server and library answers byte-equal for the golden queries.
@@ -1372,6 +1374,15 @@ Not planned in detail; write a new spec when you get here ([spec §14](Rustline-
 - **Public release:** make Rustline usable by other developers: a license, a versioned API with a changelog, docs for outside developers, publishing to crates.io and pub.dev, and possible Kotlin/Swift bindings. `rustline_flutter` stays in this repo, and the core stays framework-agnostic.
 
 ---
+
+## Final check — real-feeds workflow
+
+Added 2026-10-26. The weekly `real-feeds.yml` workflow (Mondays 04:00 UTC) has never run: GitHub skipped its first scheduled run on 2026-10-26, so the tests against real GTFS feeds have not yet passed in CI.
+
+Before calling the project done:
+
+- [ ] Run `real-feeds.yml` (scheduled or by hand with `gh workflow run real-feeds.yml`) and confirm it passes on main.
+- [ ] Confirm the Monday schedule is firing on its own.
 
 ## Appendix A — Crates you'll add, and when
 

@@ -8,8 +8,9 @@ repository.workspace = true
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
-# Pinned: 0.50 pulls zip 8.6, which needs Rust 1.88 (our MSRV is 1.85).
-gtfs-structures = { version = "=0.48.0", default-features = false }
+# Exact version: 0.x bumps change the API, so a bump is reviewed on its own
+# (Dependabot opens a separate PR for it).
+gtfs-structures = { version = "=0.52.0", default-features = false }
 rustline-model = { path = "../rustline-model" }
 rustline-pack = { path = "../rustline-pack" }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -20,6 +21,6 @@ csv = "1.4"
 # Own trips/stop_times reader (M7): csv's own low-level parser (already in the
 # tree through csv), used for its fixed-size buffers so a row can't grow memory.
 csv-core = "0.1.13"
-zip = { version = "7.2", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # IANA timezone names: agency_timezone is checked at build time (M1 gap #4).
 chrono-tz = "0.10"

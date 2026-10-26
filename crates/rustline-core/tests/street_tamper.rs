@@ -113,8 +113,8 @@ fn nodes_moved_to_opposite_corners_of_the_globe_are_rejected() {
     let (meta, data0) = with_streets(20, 0.0005, 0.0005);
     let moved = |deg: f64| {
         let mut data = data0.clone();
-        for k in 0..4 {
-            let (lat, lon) = if k % 2 == 0 {
+        for k in 0..4usize {
+            let (lat, lon) = if k.is_multiple_of(2) {
                 (-deg, -179.0)
             } else {
                 (deg, 179.0)
@@ -343,7 +343,7 @@ fn tampered_real_pack_peak_memory() {
     // RUSTLINE_TAMPER_LAT: 89 (the review) or e.g. 84 (inside the ±85° bound).
     let deg: f64 = std::env::var("RUSTLINE_TAMPER_LAT").map_or(89.0, |v| v.parse().unwrap());
     for i in 0..k.min(data.street_lat.len()) {
-        let (lat, lon) = if i % 2 == 0 {
+        let (lat, lon) = if i.is_multiple_of(2) {
             (-deg, -179.0)
         } else {
             (deg, 179.0)

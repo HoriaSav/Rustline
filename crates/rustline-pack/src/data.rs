@@ -556,7 +556,7 @@ pub(crate) fn check_arrays(t: &impl Arrays) -> Result<(), String> {
         let p = at(A::TripPattern, tr);
         let n = at(A::PatternStopsStart, p + 1) - at(A::PatternStopsStart, p);
         let start = at(A::TripTimesStart, tr);
-        if start % 2 != 0 {
+        if !start.is_multiple_of(2) {
             return Err(format!("times of trip {tr} start at an odd offset"));
         }
         let end = start + 2 * n;

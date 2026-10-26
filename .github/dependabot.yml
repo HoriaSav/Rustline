@@ -10,15 +10,15 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     ignore:
-      # Pinned to =0.48.0: newer versions need Rust > our MSRV 1.85.
-      - dependency-name: gtfs-structures
-        versions: [">=0.49"]
-      # Moves only together with flutter_rust_bridge_codegen, the Dart
-      # package and the regenerated bindings: upgraded by hand (plan M10).
+      # Upgraded by hand: the Rust crate, the Dart package and
+      # flutter_rust_bridge_codegen move in lockstep, then bindings are
+      # regenerated (plan M10 decision 7).
       - dependency-name: flutter_rust_bridge
     groups:
       cargo:
         patterns: ["*"]
+        # Its 0.x bumps change the API: reviewed in a PR of its own.
+        exclude-patterns: ["gtfs-structures"]
 
   # Actions used in .github/workflows
   - package-ecosystem: github-actions
@@ -27,7 +27,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     ignore:
-      # Pinned to a commit sha; the toolchain (1.85 MSRV, stable) is the
+      # Pinned to a commit sha; the toolchain (MSRV, stable) is the
       # `toolchain:` input, so a Dependabot bump adds nothing. Updated by hand.
       - dependency-name: dtolnay/rust-toolchain
     groups:

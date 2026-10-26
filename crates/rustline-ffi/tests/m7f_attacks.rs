@@ -185,12 +185,12 @@ fn concurrent_good_and_bad_installs_end_with_a_good_pack() {
     let dest = d.join("brasov.rlp").to_string_lossy().into_owned();
     install(&gz, &dest).unwrap();
     std::thread::scope(|s| {
-        for i in 0..8 {
+        for i in 0..8u32 {
             let (gz, bz, dest) = (&gz, &bz, &dest);
             s.spawn(move || {
                 for _ in 0..10 {
-                    let r = install(if i % 2 == 0 { gz } else { bz }, dest);
-                    if i % 2 == 0 {
+                    let r = install(if i.is_multiple_of(2) { gz } else { bz }, dest);
+                    if i.is_multiple_of(2) {
                         r.expect("good install");
                     } else {
                         assert_eq!(err_code(r), "pack_corrupt");
@@ -229,7 +229,7 @@ fn disk_check_agrees_with_read_pack_on_a_real_pack() {
         x ^= x << 17;
         let mut b = good.clone();
         // Mostly the tail (index arrays and roots), some anywhere in the body.
-        let i = if k % 2 == 0 {
+        let i = if k.is_multiple_of(2) {
             end - 1 - (x as usize % 4096.min(end - start))
         } else {
             start + x as usize % (end - start)

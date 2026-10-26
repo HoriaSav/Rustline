@@ -18,11 +18,11 @@ rustline-core = { path = "../rustline-core" }
 rustline-model = { path = "../rustline-model" }
 rustline-pack = { path = "../rustline-pack" }
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
-# Must match the Dart package and the codegen exactly (plan M6 DoD). Builds on 1.85.
+# Must match the Dart package and the codegen exactly (plan M6 DoD); upgraded by hand.
 # Only the features the generated code needs (M7 R6): the default handler's
 # thread pool and its async executor, and dart-opaque for its helpers. Left out:
 # anyhow, log, user-utils (android_logger/oslog), portable-atomic, wasm-start.
-flutter_rust_bridge = { version = "=2.12.0", default-features = false, features = [
+flutter_rust_bridge = { version = "=2.13.0", default-features = false, features = [
     "thread-pool",
     "rust-async",
     "dart-opaque",
@@ -30,7 +30,7 @@ flutter_rust_bridge = { version = "=2.12.0", default-features = false, features 
 # Free space of the pack folder before installing (statvfs); already in Cargo.lock.
 libc = "0.2"
 # Decompressing a downloaded .rlp.zst in install_pack; same version as rustline-pack.
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 # Tests only: an anyhow::Error wrapper in the test adapter, tiny packs from GTFS.

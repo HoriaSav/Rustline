@@ -69,7 +69,11 @@ fn packs_are_byte_identical_to_m6() {
         for e in std::fs::read_dir(&dir).unwrap() {
             let p = e.unwrap().path();
             let rel = format!("{feed}/{}", p.file_name().unwrap().to_string_lossy());
-            let got = format!("{:x}", Sha256::digest(std::fs::read(&p).unwrap()));
+            // sha2 0.11 digests have no `LowerHex`: hex the bytes.
+            let got: String = Sha256::digest(std::fs::read(&p).unwrap())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             match want.lines().find(|l| l.ends_with(&format!("  {rel}"))) {
                 Some(l) if l.starts_with(&got) => checked += 1,
                 Some(_) => diffs.push(format!("{rel}: sha differs")),

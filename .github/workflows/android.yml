@@ -18,7 +18,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   NDK_VERSION: 26.1.10909125
-  FLUTTER_VERSION: 3.27.4
+  FLUTTER_VERSION: 3.47.8
 
 jobs:
   ffi:
@@ -34,30 +34,25 @@ jobs:
           - abi: x86_64
             target: x86_64-linux-android
     env:
-      # The MSRV, so the phone build proves 1.85 too (overrides
+      # The MSRV, so the phone build proves 1.88 too (overrides
       # rust-toolchain.toml, which says stable).
-      RUSTUP_TOOLCHAIN: "1.85"
+      RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
         with:
-          toolchain: "1.85"
+          toolchain: "1.88"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           key: ndk-${{ matrix.abi }}
       - name: Install NDK
         run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
-      # cargo-ndk 4.1.2 needs rustc 1.86, so the tool is built with stable;
-      # the library below still builds with the job's 1.85 (RUSTUP_TOOLCHAIN).
+      # cargo-ndk 4.1.2 needs rustc 1.86; it builds with the job's MSRV.
       - name: Install cargo-ndk
-        env:
-          RUSTUP_TOOLCHAIN: stable
-        run: |
-          rustup toolchain install stable --profile minimal
-          cargo install --locked cargo-ndk --version 4.1.2
+        run: cargo install --locked cargo-ndk --version 4.1.2
       - name: Build
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"

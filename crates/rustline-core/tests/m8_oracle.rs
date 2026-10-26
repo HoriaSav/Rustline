@@ -38,7 +38,7 @@ fn random_feed(seed: u64) -> Feed {
         .service("W", "1111100", "20310301", "20311031")
         .exception("S", "20310329", 2)
         .exception("S", "20311025", 2);
-    for line in 0..6 {
+    for line in 0..6u32 {
         let n = 3 + r.below(3) as usize;
         let mut stops: Vec<&str> = Vec::new();
         while stops.len() < n {
@@ -49,7 +49,7 @@ fn random_feed(seed: u64) -> Feed {
         }
         let hops: Vec<u32> = (1..n).map(|_| 300 + r.below(1500) as u32).collect();
         let headway = 600 + r.below(3000) as u32;
-        let svc = if line % 3 == 0 { "W" } else { "S" };
+        let svc = if line.is_multiple_of(3) { "W" } else { "S" };
         let mut t = hms(4, 0, 0) + r.below(1800) as u32;
         let mut k = 0;
         while t < hms(27, 30, 0) {

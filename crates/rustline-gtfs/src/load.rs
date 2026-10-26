@@ -41,6 +41,9 @@ pub fn load(path: &Path) -> Result<RawFeed, GtfsError> {
         source,
     })?;
     raw.transfers = None;
+    // levels.txt is unused, but gtfs-structures (since 0.52) fails the whole
+    // feed in `Gtfs::try_from` on one bad row there: drop it.
+    raw.levels = None;
 
     let mut issues = ReportBuilder::default();
     let trips = member(path, "trips.txt", |r| reader::trips(r, &mut issues))?;

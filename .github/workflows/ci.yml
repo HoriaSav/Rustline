@@ -22,8 +22,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  FLUTTER_VERSION: 3.27.4
-  FRB_VERSION: 2.12.0
+  FLUTTER_VERSION: 3.47.8
+  FRB_VERSION: 2.13.0
 
 jobs:
   rust:
@@ -50,27 +50,27 @@ jobs:
         run: cargo test --locked --workspace --release
 
   msrv:
-    name: MSRV 1.85 test
+    name: MSRV 1.88 test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Overrides rust-toolchain.toml (stable) for every cargo call here.
-      RUSTUP_TOOLCHAIN: "1.85"
+      RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
         with:
-          toolchain: "1.85"
+          toolchain: "1.88"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           key: msrv
       - name: Toolchain
         run: rustc --version
-      # Builder checklist 2: `cargo +1.85 test --locked --workspace`.
+      # Builder checklist 2: `cargo +1.88 test --locked --workspace`.
       - name: Test
-        run: cargo +1.85 test --locked --workspace
+        run: cargo +1.88 test --locked --workspace
 
   flutter:
     name: flutter analyze, test, FRB up to date

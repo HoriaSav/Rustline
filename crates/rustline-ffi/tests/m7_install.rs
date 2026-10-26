@@ -140,7 +140,7 @@ fn source_that_grows_or_shrinks_during_the_copy() {
     let good = zstd::encode_all(&tiny_pack_bytes()[..], 3).unwrap();
     let dest = d.join("brasov.rlp");
     std::fs::write(&dest, tiny_pack_bytes()).unwrap();
-    for round in 0..20 {
+    for round in 0..20u32 {
         let src = d.join("src.rlp.zst");
         let mut b = good.clone();
         // Skippable frame (magic 0x184D2A50) of 8 MiB after the real frame.
@@ -153,7 +153,7 @@ fn source_that_grows_or_shrinks_during_the_copy() {
         let r = std::thread::scope(|sc| {
             let h = sc.spawn(|| install(&s, &dst));
             let f = std::fs::OpenOptions::new().write(true).open(&src).unwrap();
-            if round % 2 == 0 {
+            if round.is_multiple_of(2) {
                 f.set_len(good.len() as u64 / 2).unwrap(); // shrink mid-copy
             } else {
                 f.set_len(b.len() as u64 + (4 << 20)).unwrap(); // grow mid-copy
