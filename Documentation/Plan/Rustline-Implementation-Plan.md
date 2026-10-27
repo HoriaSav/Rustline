@@ -22,7 +22,7 @@
 | Open question | Default used in this plan | Where it matters |
 |---|---|---|
 | Q1 On-device or server first | **On-device** (confirmed) | M6 before M12 |
-| Q2 Public open-source? | Public repo, **MIT OR Apache-2.0**, not published to crates.io yet | M0 licence |
+| Q2 Public open-source? | Public repo, **Apache-2.0** (was MIT OR Apache-2.0 until 2026-10-26), not published to crates.io yet | M0 licence |
 | Q3 Brașov only or 13 feeds | **Brașov only** | Size/perf targets in M2, M5, M6 |
 | Q4 iOS? | **Android first**, iOS in M11 (Savin, 2026-10-20) | M0 targets, M6, M11 |
 | Q5 Who builds packs | **Your PC** with `rustline build-pack` | M2, M4; backend later in M14 |
@@ -147,7 +147,7 @@ Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-
 
 ### Decisions (Leader, 2026-10-20)
 - Savin reordered the plan after M6: **M7** cleanup (old M8's "Moved from M1" gaps + M6 Reviewer leftovers R1–R6), **M8** arrive-by, **M9** rRAPTOR options, **M10** GitHub CI, **M11** iOS build (GitHub macOS runners, dev PC is Linux), **M12** server (optional, not now; was M7), **M13** RoTransit integration (not now; M6 steps 4–6), **M14** future (was M9; also holds old M8's McRAPTOR walking criterion and thesis charts).
-- RoTransit integration stays last. The engine stays generic for any GTFS feed; Builder checklist §11 applies to every new milestone.
+- RoTransit integration (M13) comes right after M11, then publishing (M15), and the optional server (M12) is last, after everything else (Savin, 2026-10-26; until then RoTransit integration was last). The engine stays generic for any GTFS feed; Builder checklist §11 applies to every new milestone.
 - References elsewhere ("moved to M8" in README Known gaps) now read M7.
 
 ### Milestone overview
@@ -165,10 +165,11 @@ Learned from M1/M2 (zstd bomb, header-sized `resize`, silent bit-flips, release-
 | M8 | Arrive-by | "Be there by 09:00": reverse RAPTOR, depart-late pass | 6–9 evenings |
 | M9 | rRAPTOR options | Pareto (arrival vs transfers) + departure-window range queries | 6–10 evenings |
 | M10 | GitHub CI | fmt, clippy, tests debug+release, Flutter tests, Android build | 2–4 evenings |
-| M11 | iOS build | xcframework + Cargokit iOS, tested on GitHub macOS runners | 4–6 evenings |
-| M12 | Server (optional, not now) | Same engine behind `POST /v1/plan` | 3–5 evenings |
-| M13 | RoTransit integration (not now) | M6 steps 4–6 inside RoTransit | 6–10 evenings |
+| M11 | iOS build | Cargokit iOS (arm64 device + sim), tested on GitHub macOS runners | 4–6 evenings |
+| M13 | RoTransit integration (next) | M6 steps 4–6 inside RoTransit | 6–10 evenings |
+| M15 | Publish | `rustline_flutter` on pub.dev with prebuilt native libraries; RoTransit uses the published plugin | 4–6 evenings |
 | M14 | Future | Backend-served packs, realtime, multi-city, McRAPTOR walking, thesis charts (own spec) | — |
+| M12 | Server (optional, last) | Same engine behind `POST /v1/plan` | 3–5 evenings |
 
 Total to a working phone prototype (M0–M6): roughly **50–70 evenings (est.)**.
 
@@ -228,7 +229,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [profile.release]
 opt-level = 3
@@ -250,7 +251,7 @@ rustline-pack  = { path = "../rustline-pack" }
 - *Why:* writing the dependency graph now prevents accidental cycles later (e.g. `core` must **never** depend on `gtfs`).
 
 **6. README, licence, .gitignore**
-- *How:* add `LICENSE-MIT`, `LICENSE-APACHE`, a short `README.md` (one paragraph from spec §1 + "status: M0"), `.gitignore` with `/target`, `*.rlp`, `*.osm.pbf`, `data/raw/`.
+- *How:* add `LICENSE` (Apache-2.0 only; Savin 2026-10-26, was MIT OR Apache-2.0), a short `README.md` (one paragraph from spec §1 + "status: M0"), `.gitignore` with `/target`, `*.rlp`, `*.osm.pbf`, `data/raw/`.
 - *Why:* big data files must never end up in git; licence decided early is easier than later. Mention ODbL attribution for OSM/RATBV data in the README.
 
 **7. CI**
@@ -1225,7 +1226,7 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 ### Steps
 1. Extend `.github/workflows/ci.yml` (Ubuntu): `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo test --locked --workspace` in **debug and release**; MSRV job with Rust 1.88 (was 1.85 until 2026-10-26).
 2. Flutter job: pinned Flutter version, `flutter analyze` and `flutter test` in `rustline_flutter` and `rustline_flutter/example`; check generated FRB code is up to date (`flutter_rust_bridge_codegen generate` then `git diff --exit-code`).
-3. Android job (`android.yml`): `cargo ndk` for arm64-v8a + x86_64 with NDK 26.1.10909125, `flutter build apk --release` of the example; upload `.so` sizes as a job summary.
+3. Android job (`android.yml`): `cargo ndk` for arm64-v8a + x86_64 with NDK 26.1.10909125 (28.2.13676358 since M11, R49), `flutter build apk --release` of the example; upload `.so` sizes as a job summary.
 4. Optional emulator job: integration test on an x86_64 emulator (reactivecircus/android-emulator-runner), allowed to be a separate workflow if slow.
 5. Caching (`Swatinem/rust-cache`, Gradle, pub), `concurrency` to cancel superseded runs, `permissions: contents: read`, actions pinned to a commit sha, Dependabot for actions.
 6. Real-feed tests: CI has no feeds (gitignored); either they stay `#[ignore]` in CI, or a job runs `scripts/fetch-fixtures.sh` with the manifest sha256 check and caches the result. Decide and document.
@@ -1254,7 +1255,7 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 **Time (est.):** 2–4 evenings. (Pushing workflows needs Savin's "push".)
 
 ### Decisions (Builder, 2026-10-23)
-1. **Workflows.** `ci.yml` (required): `rust` (fmt, clippy, test debug + release on stable), `msrv` (`cargo +1.88 test --locked --workspace`, `RUSTUP_TOOLCHAIN=1.88` because `rust-toolchain.toml` says stable), `flutter` (Flutter 3.47.8: `pub get --enforce-lockfile`, `flutter analyze` in the plugin and the example, `flutter test` in the plugin, then `flutter_rust_bridge_codegen` 2.13.0 `generate` + `git diff --exit-code`). `android.yml` (required): `cargo ndk` arm64-v8a + x86_64 on 1.88 with NDK 26.1.10909125 and `.so` sizes in the job summary, and `flutter build apk --release` of the example with APK/`.so` sizes. `android-emulator.yml` (manual, step 4) and `real-feeds.yml` (manual + weekly, step 6) are not required checks. `bench.yml` stays manual.
+1. **Workflows.** `ci.yml` (required): `rust` (fmt, clippy, test debug + release on stable), `msrv` (`cargo +1.88 test --locked --workspace`, `RUSTUP_TOOLCHAIN=1.88` because `rust-toolchain.toml` says stable), `flutter` (Flutter 3.47.8: `pub get --enforce-lockfile`, `flutter analyze` in the plugin and the example, `flutter test` in the plugin, then `flutter_rust_bridge_codegen` 2.13.0 `generate` + `git diff --exit-code`). `android.yml` (required): `cargo ndk` arm64-v8a + x86_64 on 1.88 with NDK 26.1.10909125 (28.2.13676358 since M11) and `.so` sizes in the job summary, and `flutter build apk --release` of the example with APK/`.so` sizes. `android-emulator.yml` (manual, step 4) and `real-feeds.yml` (manual + weekly, step 6) are not required checks. `bench.yml` stays manual.
 2. **Hardening (step 5).** Every action pinned to a commit sha with the tag as a comment (`actions/checkout` v7.0.1 = `3d3c42e5aac5ba805825da76410c181273ba90b1`, from `git ls-remote`; this replaces Dependabot #2) (Dependabot updates both; `dtolnay/rust-toolchain` stays ignored and gets the toolchain via `with: toolchain`). `permissions: contents: read`, `concurrency` cancel-in-progress and `timeout-minutes` on every job. Only `pull_request` triggers (no `pull_request_target`), so PR jobs have no secrets and fork runs cannot write. Caches: `Swatinem/rust-cache` (one key per job), Gradle via `setup-java`, pub via `flutter-action`.
 3. **Real feeds (step 6).** Required CI has no feeds: real-feed tests skip (missing file) or stay `#[ignore]`, as today. `real-feeds.yml` runs `scripts/fetch-fixtures.sh --skip-manual` (new flag: rows without a public URL, e.g. `brasov-manifest`, are SKIP instead of a failure), which verifies every file's manifest sha256 before the tests, caches `fixtures/feeds` by the manifest hash, then runs `cargo test --locked --workspace --release`. A changed upstream feed fails there (CHANGED), never on a PR. The m9_review Brașov tests now check the file against the manifest sha256 (`pinned_fixture`), closing the M9 backlog item; `sha2` 0.10 added as a rustline-core dev-dependency (Cargo.lock: one dependency line, no new crate).
 4. **Reruns.** No automatic retries. A failure that passes on a manual rerun is flaky: record it (run link) and fix the test or the limit; never add a retry loop.
@@ -1276,32 +1277,104 @@ Every leg prints its `%:z` offset; the last leg arrives ≤ 09:00.
 **Goal:** the `rustline_flutter` plugin builds and runs on iOS (device + simulator), tested on GitHub macOS runners because the dev PC is Linux.
 **Prerequisites:** M10.
 
+### M11 decisions (Leader, 2026-10-26, from Research's note and Tester's tests-first questions)
+- **Scope (Savin, 2026-10-26):** M11 stays local, with no pushes, test branches or workflow runs. Leader reports "ready" when the Linux-checkable parts pass; everything that needs macOS is confirmed the first time `ios.yml` runs on GitHub.
+- **Targets:** `aarch64-apple-ios` and `aarch64-apple-ios-sim` only. No `x86_64-apple-ios`; Intel simulators are not supported.
+- **No hand-made xcframework:** cargokit's CocoaPods path builds the static library per target itself. An SPM / native-assets route is a later follow-up.
+- **Runner and minimum:** `macos-26` with Xcode 26.6 pinned, an iPhone 17 simulator, and iOS 15.0 everywhere (podspec, Podfile, Xcode project).
+- **Pack location:** Application Support only, never Documents (Documents is user-visible and backed up).
+- **Backup exclusion:** set by the plugin's Swift code through a platform channel (`URLResourceValues.isExcludedFromBackup`), not by Rust/objc2, so the Rust side gets no Apple crates. A failed exclusion is returned to the caller as an error, not logged and ignored. Android makes no backup call.
+- **Helper name:** `Future<Directory> defaultPackDirectory()` in `rustline_flutter`, returning the Application Support `packs/` directory with the exclusion applied on iOS.
+- **path_provider:** allowed as a new dependency (flutter.dev first-party).
+- **Size baseline:** the example's `Runner.app` vs a blank Flutter 3.47.8 app built the same way on the same runner; recorded in the job summary, no limit in M11.
+
 ### Steps
-1. Rust targets `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`; build `rustline-ffi` as a static lib per target and bundle into an **xcframework** (`xcodebuild -create-xcframework`, sim slices merged with `lipo`).
-2. Cargokit iOS: enable the iOS side of the plugin (podspec / Swift Package), set the deployment target (document it, e.g. iOS 13), make sure the Cargokit patch for the library name also covers iOS (`librustline_ffi.a`).
-3. Pack install on iOS: Application Support / Documents path, `flock` + `statvfs` work on iOS (or a documented iOS-specific fallback), excluded from iCloud backup.
-4. `ios.yml` workflow on `macos-latest` (pinned Xcode): build xcframework, `flutter build ios --no-codesign` for the example, run the integration test on an iOS simulator, run `cargo test --locked -p rustline-ffi` on macOS too.
+1. Rust targets `aarch64-apple-ios` and `aarch64-apple-ios-sim`; cargokit builds `rustline-ffi` as a static lib per target (no hand-made xcframework, see decisions).
+2. Cargokit iOS: enable the iOS side of the plugin (podspec / Swift Package), set the deployment target to iOS 15.0, make sure the Cargokit patch for the library name also covers iOS (`librustline_ffi.a`).
+3. Pack install on iOS: Application Support path (`defaultPackDirectory()`), `flock` + `statvfs` work on iOS (or a documented iOS-specific fallback), excluded from iCloud backup.
+4. `ios.yml` workflow on `macos-26` (Xcode 26.6): `flutter build ios --no-codesign` for the example, run the integration test on an iOS simulator, run `cargo test --locked -p rustline-ffi` on macOS too.
 5. Record static lib size and app size delta; no code signing / App Store in this milestone.
 
 ### Done when
-- [ ] `ios.yml` green: xcframework built, example app built, integration test passed on the simulator
+- [ ] `ios.yml` green: example app built, integration test passed on the simulator
 - [ ] Sizes recorded; README explains how to build on a Mac
 
 ### Definition of done (strict)
 - [ ] Same FFI tests as Android pass on the simulator (error codes, injected panic → exception, install_pack two-writer test, cancellation).
 - [ ] No iOS-only code path in `rustline-core`; only `rustline-ffi`/plugin may differ, and engine stays generic.
 - [ ] Safety (§11): same caps as Android (256 MiB default); low-disk path tested via the debug free-space override.
-- **Edge cases (must be tested):** simulator on Apple Silicon (arm64-sim) vs Intel (x86_64); app relaunch after kill during install; device timezone ≠ feed timezone; file path with spaces/Unicode; app sandbox path changes between launches (store relative paths).
+- **Edge cases (must be tested):** simulator on Apple Silicon (arm64-sim; Intel simulators unsupported); app relaunch after kill during install; device timezone ≠ feed timezone; file path with spaces/Unicode; app sandbox path changes between launches (store relative paths).
 - **Tester will check:** workflow logs; a physical-iPhone run is optional and left for Savin.
+
+**Time (est.):** 4–6 evenings.
+
+### Progress
+- 2026-10-26 (Builder, local, uncommitted): iOS plugin on cargokit's CocoaPods path (`ios/rustline_flutter.podspec`, iOS 15.0, `-force_load librustline_ffi.a`); example `ios/` from the Flutter 3.47.8 template, with Podfile `platform :ios, '15.0'`. `defaultPackDirectory()` uses path_provider for Application Support `packs/`, and the Swift plugin sets `isExcludedFromBackup` over the `rustline_flutter/storage` channel. A failure throws a `PlatformException`. The pod module is `rustline_flutter`, so the plugin's `RustLib.init()` opens `rustline_flutter.framework/rustline_flutter` on iOS. `ios.yml` was not run; after R49 it triggers on PRs and pushes to main (path-filtered) and manually: it has a simulator job (iPhone 17, tiny pack), a device job (`flutter build ios --no-codesign` plus a blank-app size baseline) and an ffi job (`cargo test --locked -p rustline-ffi`). Linux checks pass (`scripts/m11-ios-check.sh`, m11_ios_config 17/17). Open: everything that needs macOS (first `ios.yml` run), and committing `Podfile.lock` after the first `pod install`. path_provider brings jni (Android): the APK gains libdartjni.so (+0.28 MB). R49: NDK 28.2.13676358 is now the one pin (app, android.yml, android-emulator.yml); the podspec has metadata, a privacy manifest (disk space E174.1, file timestamp C617.1) and `${BUILT_PRODUCTS_DIR}` paths. iOS needs `use_frameworks!` (dynamic); static linkage fails with a clear `StateError`.
+
+---
+
+## M13 — RoTransit integration (next after M11)
+
+**Goal:** RoTransit plans journeys offline with Rustline (the parts deferred from M6: steps 4–6).
+**Prerequisites:** M11, and RoTransit on Flutter 3.35.3 or newer (the plugin's floor since the 2026-10-26 dependency update). Moved up to come right after M11 (Savin, 2026-10-26); start only when Savin says so.
+
+### Steps
+1. RoTransit branch with `rustline_flutter` as a path/git dependency; bundled pack decompressed via `install_pack`.
+2. Pack freshness banner (`info().feedSha256` vs `/api/feeds`).
+3. Riverpod journey feature: planner screen, depart-at / arrive-by toggle, option list from M9, polyline on the map, links to stop boards.
+4. OSM/feed attribution in the app; A54 measurements (p50/p95, load time, memory).
+
+### Definition of done (strict)
+- [ ] All M6 acceptance items that needed RoTransit (APK delta, freshness banner, attribution, airplane-mode run on the A54, RoTransit `main` untouched).
+- [ ] Safety (§11) and the M6 **Edge cases (must be tested)** list apply unchanged, plus arrive-by and multi-option UI states (no route, one option, cap reached).
+
+---
+
+## M15 — Publish the Flutter plugin (pub.dev)
+
+**Goal:** Flutter developers can add `rustline_flutter` from pub.dev with only Flutter installed (no Rust, no NDK), and RoTransit moves from a git dependency to the published plugin.
+**Prerequisites:** M13 (the API has been used for real in RoTransit). Added 2026-10-26 (Savin); comes before the optional server (M12). Publishing is permanent (versions can be retracted, never deleted), so every `dart pub publish` needs Savin's explicit ok.
+**Scope (Savin, 2026-10-26):** only the Flutter package for now. No crates.io release: the Rust source stays in this repo and the plugin ships prebuilt native libraries. A crates.io release (merging the internal crates into one; `rustline` is taken there by an unrelated project, checked 2026-10-26) is a later option, not part of M15. `rustline_flutter` on pub.dev was free on 2026-10-26.
+
+### Steps
+1. **Public Dart API:** decide what `rustline_flutter` exports (hide generated internals), add dartdoc with examples, and a `CHANGELOG.md` (semver, starting at 0.1.0).
+2. **Precompiled native libraries:** switch cargokit to precompiled-binaries mode: a release workflow builds the Android and iOS libraries on a tag, signs them, and attaches them to a GitHub release, so apps need only Flutter. Building from source stays as a fallback.
+3. **16 KB pages:** NDK 28.2 or `-Wl,-z,max-page-size=16384`, so Android libraries meet Google Play's 16 KB page requirement. *(Done in M11 R49: NDK 28.2.13676358 is the single pin in the example app and both Android workflows; verify LOAD align 0x4000 with `llvm-readelf -lW`.)*
+4. **pub.dev package:** pubspec metadata (description, repository, license Apache-2.0, topics, platforms), example, `dart pub publish --dry-run` clean, and a pana score check.
+5. **RoTransit:** switch the dependency from git to the published `rustline_flutter` version.
+
+### Definition of done (strict)
+- [ ] `dart pub publish --dry-run` has no warnings; pana reports no missing-documentation or platform issues.
+- [ ] A fresh Flutter app with only Flutter installed (no Rust, no NDK) adds `rustline_flutter`, builds an Android APK and an iOS simulator build, and plans a Brașov journey.
+- [ ] Downloaded precompiled libraries are verified (signature or checksum) before use; a tampered library fails the build.
+- [ ] Every exported Dart API item is documented; CHANGELOG covers the first release.
+- [ ] Android `.so` LOAD alignment is 0x4000 or more on both ABIs.
+- [ ] Savin approved the publish; RoTransit builds against the published version.
 
 **Time (est.):** 4–6 evenings.
 
 ---
 
-## M12 — Server (optional, not now)
+## M14 — Future (separate spec)
+
+**Edge cases to carry into the M14 spec:** downloaded packs are untrusted (size cap, checksum, version, signature or sha from `/api/feeds` checked before use); interrupted/resumed download; pack newer than the app supports; realtime updates for trips not in the pack, delays > 24 h, cancelled stops; stale realtime data; all Builder checklist §11 items apply.
+
+Not planned in detail; write a new spec when you get here ([spec §14](Rustline-Spec.md#14-realtime-future), [§17](Rustline-Spec.md#17-milestones)):
+- **Backend-served packs:** backend_v2 builds a pack when FeedService detects a new sha and serves `/api/feeds/{id}/routing-pack` with the same ETag logic; the app downloads it instead of waiting for an app update.
+- **Realtime:** GTFS‑RT delay overlay (only if RATBV publishes it).
+- **Multi-city:** the other 12 feeds — re-check pack sizes and phone memory.
+- **M9 backlog:** carry only changed stops in `raptor_range`; a light walk pass in `departures()`; mirrored back.rs arrive-by range.
+- **Cheaper depart-late** (from M9): cut the M8 depart-late pass cost (depart-at ~2× M7 p95).
+- **Quality+ leftovers (from old M8):** McRAPTOR with walking as a 3rd criterion (capped bags, Pareto on arrival/rides/walk, phone p95 < 150 ms), walking weight, thesis material (criterion charts, RAPTOR vs CSA, pack size table, phone vs PC timings, `cargo doc`).
+- Live delays (GTFS-RT), wheelchair trips, delta pack updates, fares, pack-reader fuzzing.
+- **After publishing (M15):** a crates.io release (merge the internal crates into one), possible Kotlin/Swift bindings. `rustline_flutter` stays in this repo, and the core stays framework-agnostic.
+
+---
+
+## M12 — Server (optional, last)
 
 **Goal:** the same engine answers `POST /v1/plan` over HTTP, with identical results to the library.
-**Prerequisites:** M9 (so the server has arrive-by and options). Not scheduled; only if Savin asks.
+**Prerequisites:** M9 (so the server has arrive-by and options). Moved to the end of the plan, after publishing (Savin, 2026-10-26); only if Savin asks.
 **Spec:** [§11.4](Rustline-Spec.md#114-http-json-rustline-server-optional).
 
 ### Steps
@@ -1339,39 +1412,6 @@ curl -s localhost:8088/v1/plan -H 'content-type: application/json' \
 - Exposing it publicly without limits — if you put it behind your Cloudflare tunnel, add rate limiting.
 
 **Time (est.):** 3–5 evenings.
-
----
-
-## M13 — RoTransit integration (not now)
-
-**Goal:** RoTransit plans journeys offline with Rustline (the parts deferred from M6: steps 4–6).
-**Prerequisites:** M11. **Not to be done now** (Savin, 2026-10-20); kept last on purpose.
-
-### Steps
-1. RoTransit branch with `rustline_flutter` as a path/git dependency; bundled pack decompressed via `install_pack`.
-2. Pack freshness banner (`info().feedSha256` vs `/api/feeds`).
-3. Riverpod journey feature: planner screen, depart-at / arrive-by toggle, option list from M9, polyline on the map, links to stop boards.
-4. OSM/feed attribution in the app; A54 measurements (p50/p95, load time, memory).
-
-### Definition of done (strict)
-- [ ] All M6 acceptance items that needed RoTransit (APK delta, freshness banner, attribution, airplane-mode run on the A54, RoTransit `main` untouched).
-- [ ] Safety (§11) and the M6 **Edge cases (must be tested)** list apply unchanged, plus arrive-by and multi-option UI states (no route, one option, cap reached).
-
----
-
-## M14 — Future (separate spec)
-
-**Edge cases to carry into the M14 spec:** downloaded packs are untrusted (size cap, checksum, version, signature or sha from `/api/feeds` checked before use); interrupted/resumed download; pack newer than the app supports; realtime updates for trips not in the pack, delays > 24 h, cancelled stops; stale realtime data; all Builder checklist §11 items apply.
-
-Not planned in detail; write a new spec when you get here ([spec §14](Rustline-Spec.md#14-realtime-future), [§17](Rustline-Spec.md#17-milestones)):
-- **Backend-served packs:** backend_v2 builds a pack when FeedService detects a new sha and serves `/api/feeds/{id}/routing-pack` with the same ETag logic; the app downloads it instead of waiting for an app update.
-- **Realtime:** GTFS‑RT delay overlay (only if RATBV publishes it).
-- **Multi-city:** the other 12 feeds — re-check pack sizes and phone memory.
-- **M9 backlog:** carry only changed stops in `raptor_range`; a light walk pass in `departures()`; mirrored back.rs arrive-by range.
-- **Cheaper depart-late** (from M9): cut the M8 depart-late pass cost (depart-at ~2× M7 p95).
-- **Quality+ leftovers (from old M8):** McRAPTOR with walking as a 3rd criterion (capped bags, Pareto on arrival/rides/walk, phone p95 < 150 ms), walking weight, thesis material (criterion charts, RAPTOR vs CSA, pack size table, phone vs PC timings, `cargo doc`).
-- Live delays (GTFS-RT), wheelchair trips, delta pack updates, fares, pack-reader fuzzing.
-- **Public release:** make Rustline usable by other developers: a license, a versioned API with a changelog, docs for outside developers, publishing to crates.io and pub.dev, and possible Kotlin/Swift bindings. `rustline_flutter` stays in this repo, and the core stays framework-agnostic.
 
 ---
 

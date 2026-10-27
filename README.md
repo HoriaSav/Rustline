@@ -9,7 +9,7 @@ Rustline is an offline public transport trip planner and transit routing library
 > An offline, on-device public-transport journey planner in Rust: it answers "I am at A at time T and want to get to B — what should I do?" from GTFS timetables and OpenStreetMap streets, without a server.
 
 [![CI](https://github.com/HoriaSav/Rustline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/HoriaSav/Rustline/actions/workflows/ci.yml)
-![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-in%20development-yellow)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-orange)
 
@@ -47,7 +47,7 @@ It is a standalone Rust library first; the RoTransit Flutter app (Brașov and ot
 - **Multiple journey options (rRAPTOR)** — a departure window (depart-at) or arrival window (arrive-by) of up to 2 h returns up to 20 options, each tagged `Fastest`, `FewestTransfers` or `LeavesLatest`.
 - **Walking on real streets** — OSM foot graph, snapping (≤ 300 m), footpaths between stops (≤ 500 m), walk-only answers up to 3 km.
 - **Calendar and time edge cases** — service days D-1/D/D+1 across midnight, DST-aware (chrono-tz), `calendar_dates`, `frequencies.txt`, `transfers.txt` types 0–3, feed-expiry warnings.
-- **Flutter plugin** — `rustline_flutter` (flutter_rust_bridge 2.13.0) with stable error codes, safe atomic pack install, and a "newest search wins" planner; Android arm64-v8a and x86_64.
+- **Flutter plugin** — `rustline_flutter` (flutter_rust_bridge 2.13.0) with stable error codes, safe atomic pack install, and a "newest search wins" planner; Android arm64-v8a and x86_64, iOS arm64 (devices and the Apple Silicon simulator).
 
 ## Preview
 
@@ -71,7 +71,7 @@ Real output of `rustline plan` on the Brașov pack:
 | Language | Rust (stable, pinned in `rust-toolchain.toml`; MSRV 1.88, `rust-version` in `Cargo.toml`); Dart for the plugin |
 | Framework | flutter_rust_bridge **2.13.0** + Cargokit (Flutter plugin) |
 | Data | GTFS feeds, OpenStreetMap `.osm.pbf` extracts, own binary pack format v4 (zstd-compressed) |
-| Tools | Cargo workspace, criterion benchmarks, chrono / chrono-tz, `cargo-ndk` 4.1.2, Android NDK 26.1.10909125, GitHub Actions |
+| Tools | Cargo workspace, criterion benchmarks, chrono / chrono-tz, `cargo-ndk` 4.1.2, Android NDK 28.2.13676358, GitHub Actions |
 
 Rustline uses flutter_rust_bridge 2.13.0 (Rust crate, Dart package and codegen; the three versions must match) and is built and tested with Flutter 3.47.8. An app using the plugin needs Flutter 3.35.3 or newer (Dart ≥ 3.9.2), as set in `rustline_flutter/pubspec.yaml`; RoTransit (Flutter 3.27, Dart 3.6) has to upgrade Flutter before it can use this version.
 
@@ -80,7 +80,7 @@ Rustline uses flutter_rust_bridge 2.13.0 (Rust crate, Dart package and codegen; 
 ### Prerequisites
 
 - [rustup](https://rustup.rs) (the toolchain in `rust-toolchain.toml`, including the Android targets `aarch64-linux-android` and `x86_64-linux-android`, installs itself on first use)
-- For Android: `cargo install cargo-ndk`, Android NDK 26.1.10909125 and JDK 17 (the example app builds with Java 17)
+- For Android: `cargo install cargo-ndk`, Android NDK 28.2.13676358 and JDK 17 (the example app builds with Java 17)
 - For the Flutter plugin: Flutter 3.47.8 and `flutter_rust_bridge_codegen` 2.13.0
 
 ### Installation
@@ -113,8 +113,34 @@ Rustline uses flutter_rust_bridge 2.13.0 (Rust crate, Dart package and codegen; 
 Android cross-compile:
 
 ```bash
-export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/26.1.10909125
+export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/28.2.13676358
 cargo ndk -t arm64-v8a build --locked --release -p rustline-ffi   # what CI (android.yml) runs
+```
+
+### Building on a Mac (iOS)
+
+You need an Apple Silicon Mac with Xcode 26.6 (the version `ios.yml` uses), CocoaPods and Flutter 3.47.8. Apps must target iOS 15.0 or later. Only two slices are built: arm64 devices (`aarch64-apple-ios`) and the Apple Silicon simulator (`aarch64-apple-ios-sim`). Intel (x86_64) simulators are not supported.
+
+The plugin's pod builds `rustline-ffi` as a static library with cargokit, in a script phase that runs before compile, and links it into `rustline_flutter.framework`. Your app's Podfile must use dynamic frameworks (`use_frameworks!`, which Flutter's default Podfile already has). With static linkage that framework does not exist, and `RustLib.init()` throws a `StateError` that says `use_frameworks!` is needed.
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim   # rust-toolchain.toml lists only the Android targets
+cd rustline_flutter/example
+flutter pub get
+flutter build ios --no-codesign          # device build, nothing signed
+flutter run -d "iPhone 17"               # or any booted arm64 simulator
+```
+
+Install packs into the directory that `defaultPackDirectory()` returns: `packs/` under Application Support, created if missing. On iOS that directory is excluded from iCloud backup, because a pack can be downloaded again. If the exclusion fails, `defaultPackDirectory()` throws the `PlatformException` instead of returning a directory that would be backed up. Call it on every launch instead of saving the path, because the iOS container path changes between installs.
+
+To run the iOS integration tests on a simulator with a real pack, as `ios.yml` does:
+
+```bash
+cargo run --locked --release -p rustline-cli -- build-pack --gtfs data/fixtures/tiny --out /tmp/pack --feed-id tiny
+cd rustline_flutter/example
+flutter test integration_test -d "iPhone 17" \
+  --dart-define=RUSTLINE_M11_PACK_ZST="$(ls /tmp/pack/*.rlp.zst)" \
+  --dart-define=RUSTLINE_M11_REQUIRE_PACK=true
 ```
 
 ## Usage
@@ -215,8 +241,9 @@ API rules:
 import 'package:rustline_flutter/rustline_flutter.dart';
 
 await RustLib.init();
-final info = await installPack(srcZst: downloadedZstPath, dest: '$appDir/brasov.rlp'); // atomic, streamed, checks free space; header fields only (counts 0)
-final engine = await RustlineEngine.open(path: '$appDir/brasov.rlp');
+final packs = await defaultPackDirectory(); // packs/ in Application Support; on iOS excluded from iCloud backup
+final info = await installPack(srcZst: downloadedZstPath, dest: '${packs.path}/brasov.rlp'); // atomic, streamed, checks free space; header fields only (counts 0)
+final engine = await RustlineEngine.open(path: '${packs.path}/brasov.rlp');
 final planner = RustlinePlanner(engine: engine);
 
 final now = DateTime.now();
@@ -240,6 +267,8 @@ planner.cancel(); // e.g. when leaving the screen
 - `FfiPlanRequest.windowSecs` (`int?`) is the departure window (arrive-by: arrival window); `maxResults` is 1–20; `maxTransfers` above 8 is `invalid_request`.
 - `FfiItinerary.tags` is a `List<FfiTag>`: `FfiTag.fastest`, `FfiTag.fewestTransfers`, `FfiTag.leavesLatest` (same meaning as `Tag` in Rust; `fastest` is the earliest arrival in both modes).
 - `RustlinePlanner`: the newest search wins; a superseded one resolves to `null`. Each Rust call is bounded (≤ 1 s).
+- `defaultPackDirectory()` returns `packs/` under Application Support. Call it on every launch; see [Building on a Mac (iOS)](#building-on-a-mac-ios).
+- On iOS, `RustLib.init()` opens `rustline_flutter.framework` itself, so the app needs `use_frameworks!`.
 - Host (desktop) runs load the library explicitly: `RustLib.init(externalLibrary: ExternalLibrary.open('target/release/librustline_ffi.so'))`.
 
 The Dart API is generated from `crates/rustline-ffi/src/api.rs`:
@@ -266,12 +295,11 @@ Rustline/
 ├── tests/golden/         # Golden Brașov journeys
 ├── data/fixtures/        # Small committed feeds: tiny (clean), broken (one of each error)
 ├── fixtures/             # manifest.tsv; feeds/ is git-ignored, filled by scripts/
-├── scripts/              # fetch-fixtures.sh
+├── scripts/              # fetch-fixtures.sh, m11-ios-check.sh
 ├── Documentation/Plan/   # Rustline-Spec.md, Rustline-Implementation-Plan.md
-├── .github/workflows/    # ci.yml, android.yml, bench.yml
+├── .github/workflows/    # ci.yml, android.yml, android-emulator.yml, ios.yml, real-feeds.yml, bench.yml
 ├── rust-toolchain.toml   # Pinned Rust toolchain and Android targets
-├── LICENSE-APACHE
-├── LICENSE-MIT
+├── LICENSE
 └── README.md
 ```
 
@@ -313,6 +341,8 @@ cargo test --locked --release -p rustline-osm --test m4_osm -- --ignored --nocap
 
 The Flutter plugin's integration tests run on an x86_64 android-34 emulator (AVD `rustline_x64`) locally, or in CI with `android-emulator.yml`. See [Continuous integration](#continuous-integration).
 
+The iOS integration tests run on an iPhone 17 simulator in `ios.yml` (see [Building on a Mac (iOS)](#building-on-a-mac-ios)). Without a Mac, `scripts/m11-ios-check.sh` runs the checks that work on Linux: actionlint on `ios.yml`, the static M11 config tests, `cargo check` and clippy of `rustline-ffi` for both iOS targets (Rust code only; C code goes through a stub compiler and nothing links), and the plugin's storage unit tests and `flutter analyze`.
+
 ## Continuous integration
 
 GitHub Actions workflows in `.github/workflows/`:
@@ -322,6 +352,7 @@ GitHub Actions workflows in `.github/workflows/`:
 | `ci.yml` (CI) | push to `main`, every pull request, manual | `rust`: `cargo fmt --check`, `clippy -D warnings`, tests debug + release (stable); `msrv`: tests on Rust 1.88; `flutter`: `flutter analyze` (plugin + example), plugin `flutter test`, and a check that `flutter_rust_bridge_codegen generate` (2.13.0) leaves no diff |
 | `android.yml` (Android) | push to `main`, every pull request, manual | `ffi`: `cargo ndk` release build of `rustline-ffi` for arm64-v8a and x86_64 on Rust 1.88, `.so` size in the job summary; `apk`: example `flutter build apk --release`, APK and `.so` sizes in the summary |
 | `android-emulator.yml` | manual only | example `integration_test` on an x86_64 API 34 emulator; pack-based tests print `skip:` (no pack) |
+| `ios.yml` (iOS) | pull requests and pushes to `main` that touch `rustline_flutter/`, `crates/`, Cargo files, `rust-toolchain.toml` or the tiny fixture; manual | macOS 26, Xcode 26.6. `simulator`: example `integration_test` on an iPhone 17 simulator with the tiny pack; `device`: `flutter build ios --release --no-codesign` of the example and of a blank app, sizes in the job summary and the `ios-size` artifact; `ffi`: `cargo test -p rustline-ffi` on macOS |
 | `real-feeds.yml` | manual, and Mondays 04:00 UTC | fetches and verifies real feeds, then `cargo test --workspace --release` with them present |
 | `bench.yml` | manual only | `cargo bench -p rustline-core --bench plan` (spot checks; shared runners are noisy) |
 
@@ -342,10 +373,11 @@ GitHub Actions workflows in `.github/workflows/`:
 - [x] M8 — Arrive-by: "be there by 09:00" (reverse RAPTOR)
 - [x] M9 — rRAPTOR options: Pareto (arrival vs transfers) + departure-window range queries
 - [x] M10 — GitHub CI: fmt, clippy, tests debug+release, Flutter tests, Android build
-- [ ] M11 — iOS build: xcframework + Cargokit iOS on GitHub macOS runners
-- [ ] M12 — Server (optional): same engine behind `POST /v1/plan`
+- [ ] M11 — iOS build: Cargokit iOS (arm64 device + simulator) on GitHub macOS runners *(built, not yet run on macOS)*
 - [ ] M13 — RoTransit integration
+- [ ] M15 — Publish: `rustline_flutter` on pub.dev with prebuilt native libraries
 - [ ] M14 — Future: backend-served packs, realtime, multi-city, McRAPTOR walking
+- [ ] M12 — Server (optional, last): same engine behind `POST /v1/plan`
 
 ### Known gaps
 
@@ -401,6 +433,13 @@ GitHub Actions workflows in `.github/workflows/`:
 
 31. **Uncapped feed files** – `gtfs-structures` 0.52 caps none of the files it reads: agency.txt, routes.txt, stops.txt, trips.txt, calendar.txt, calendar_dates.txt, shapes.txt, fare_attributes.txt, fare_rules.txt, frequencies.txt, transfers.txt, pathways.txt, feed_info.txt, translations.txt, levels.txt (new in 0.52), attributions.txt (since 0.50) and licenses.txt (since 0.51), plus the newer fare and ticketing files (fare_products.txt, fare_media.txt, rider_categories.txt, ticketing_*.txt), are each parsed whole, with no cap on bytes or rows, so a huge or zip-bombed file can grow memory (desktop tool only). stop_times.txt is turned off there (Rustline streams it itself; see #29). Rustline's own cap covers only transfers.txt (256 MiB, `load.rs`). levels.txt is still read and parsed, then dropped (`raw.levels = None` in `rustline-gtfs` `load.rs`): Rustline does not use it, and a bad row there no longer fails the build.
 
+**M11**
+
+32. **Not run on macOS yet** – `ios.yml` is new on this branch and has not run on GitHub. Linking, the simulator tests, the iCloud backup flag on a real container, Xcode 26.6 and the app sizes are only checked there. So far only `scripts/m11-ios-check.sh` has run, on Linux.
+33. **No real iPhone** – tests run on a simulator; device builds are unsigned (`--no-codesign`) and have not been installed on a phone.
+34. **Slices and linkage** – arm64 only (no x86_64 simulator), and only dynamic frameworks (`use_frameworks!`); static linkage fails at `RustLib.init()`.
+35. **Stable Rust only on iOS** – `ios.yml` uses the stable toolchain; the iOS targets are not tested on the MSRV (1.88).
+
 ## Similar projects
 
 - [OpenTripPlanner](https://www.opentripplanner.org/), a multimodal trip planner in Java that runs as a server.
@@ -424,7 +463,7 @@ The design lives in [Documentation/Plan/Rustline-Spec.md](Documentation/Plan/Rus
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option.
+Licensed under the [Apache License 2.0](LICENSE).
 
 **Data attribution:** Map data © OpenStreetMap contributors, available under the [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/). Timetable data from RATBV Brașov; any derived databases are subject to the ODbL where applicable.
 
