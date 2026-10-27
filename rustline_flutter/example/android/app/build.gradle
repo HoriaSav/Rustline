@@ -7,8 +7,9 @@ plugins {
 android {
     namespace = "ro.horiasav.rustline_flutter_example"
     compileSdk = flutter.compileSdkVersion
-    // The NDK installed on Savin's PC and in CI (README "Toolchain").
-    ndkVersion = "26.1.10909125"
+    // The one NDK on Savin's PC and in CI (README "Toolchain"): Flutter 3.47.8's
+    // default, which jni (via path_provider) builds with; r28 links 16 KB-aligned.
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

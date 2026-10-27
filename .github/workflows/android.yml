@@ -17,7 +17,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NDK_VERSION: 26.1.10909125
+  NDK_VERSION: 28.2.13676358
   FLUTTER_VERSION: 3.47.8
 
 jobs:
@@ -47,7 +47,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
-          key: ndk-${{ matrix.abi }}
+          key: ndk-${{ env.NDK_VERSION }}-${{ matrix.abi }}
       - name: Install NDK
         run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
       # cargo-ndk 4.1.2 needs rustc 1.86; it builds with the job's MSRV.
@@ -79,7 +79,7 @@ jobs:
           targets: aarch64-linux-android, x86_64-linux-android
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
-          key: apk
+          key: apk-ndk-${{ env.NDK_VERSION }}
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0
         with:
           distribution: temurin
