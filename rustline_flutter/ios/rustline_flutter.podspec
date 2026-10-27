@@ -37,8 +37,12 @@ Rustline plans public-transport journeys on the device from a compact routing pa
   }
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
-    # Flutter.framework does not contain a i386 slice.
-    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
+    # Flutter.framework has no i386 slice, and M11 is arm64-only: no x86_64
+    # simulator slice, so cargokit builds only aarch64-apple-ios-sim (Flutter's
+    # podhelper sets ONLY_ACTIVE_ARCH=NO on Debug pods, which otherwise builds
+    # x86_64 too). Not in user_target_xcconfig: the app already builds only the
+    # active arch (arm64) for a simulator destination.
+    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386 x86_64',
     # -force_load keeps the FFI symbols that Dart looks up at runtime.
     'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/librustline_ffi.a',
   }
