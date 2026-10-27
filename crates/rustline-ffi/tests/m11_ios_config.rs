@@ -144,8 +144,13 @@ fn step_idx(job: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
     steps(job).iter().position(|s| pred(&bare(s)))
 }
 
+/// A step that runs the example's integration tests: the whole dir, a file in it, or
+/// `flutter test` in a loop over `integration_test/` (the shape is checked in
+/// `m11_ios_yml_runs_the_integration_test_with_a_real_pack`).
 fn runs_integration_tests(step: &str) -> bool {
-    step.contains("flutter test integration_test") || step.contains("flutter drive")
+    step.contains("flutter test integration_test")
+        || step.contains("flutter drive")
+        || (step.contains(" in integration_test/") && step.contains("flutter test "))
 }
 
 /// The job that runs the example's integration tests on the simulator.
@@ -309,28 +314,292 @@ fn m11_ios_yml_builds_the_example_for_a_device_without_codesign() {
     );
 }
 
+/// The run script of a step as shell lines: `\` continuations joined, each line
+/// `bare` (whitespace folded, quotes removed), empty lines dropped. Comments are
+/// already gone (`jobs` strips them).
+fn shell_lines(step: &str) -> Vec<String> {
+    step.replace("\\\n", " ")
+        .lines()
+        .map(bare)
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// `word` as a whole shell word in `line` (`continue`, but not `continued`).
+fn has_word(line: &str, word: &str) -> bool {
+    line.split(|c: char| c.is_whitespace() || c == ';')
+        .any(|w| w == word)
+}
+
+/// An `exit` command with a non-zero status (`exit 1`, `exit $rc`), not `exit 0`, a bare
+/// `exit`, or the word inside an `echo` (quotes are gone after `bare`, so only `exit` at
+/// the start of the line or after `;`, `&&`, `||`, `then` counts).
+fn exits_nonzero(line: &str) -> bool {
+    let cmd = |rest: &str| rest.starts_with("exit ") && !rest["exit ".len()..].starts_with('0');
+    cmd(line)
+        || ["; ", "&& ", "|| ", "then "].iter().any(|sep| {
+            line.match_indices(sep)
+                .any(|(i, _)| cmd(&line[i + sep.len()..]))
+        })
+}
+
+/// Both pack defines on the `flutter test` line, REQUIRE_PACK only ever `true`.
+fn check_pack_defines(id: &str, inv: &str) {
+    let zst = "--dart-define=RUSTLINE_M11_PACK_ZST=";
+    assert!(
+        inv.match_indices(zst)
+            .any(|(i, _)| inv[i + zst.len()..].chars().next().is_some_and(|c| c != ' ')),
+        "job {id}: pass --dart-define=RUSTLINE_M11_PACK_ZST=<.rlp.zst> to flutter test (m11_ios_test.dart)"
+    );
+    let req = "RUSTLINE_M11_REQUIRE_PACK=";
+    let values: Vec<&str> = inv
+        .match_indices(req)
+        .map(|(i, _)| inv[i + req.len()..].split(' ').next().unwrap_or_default())
+        .collect();
+    assert!(
+        inv.contains("--dart-define=RUSTLINE_M11_REQUIRE_PACK=true")
+            && !values.is_empty()
+            && values.iter().all(|v| *v == "true"),
+        "job {id}: pass --dart-define=RUSTLINE_M11_REQUIRE_PACK=true to flutter test so a missing \
+         pack fails instead of skipping (else the job is green with nothing tested); got {values:?}"
+    );
+}
+
+/// The `flutter test` line must not swallow its own failure.
+fn check_no_swallow(id: &str, inv: &str) {
+    assert!(
+        !inv.contains("||")
+            && !inv.contains("; true")
+            && !inv.contains("; :")
+            && !inv.ends_with('&'),
+        "job {id}: a failing or timed-out flutter test must fail the step; no `|| ...`, `; true` \
+         or `&` on its line: {inv}"
+    );
+}
+
+/// The loop form: `for V in integration_test/*_test.dart; do … done` (that exact glob, so
+/// no file can be left out). Returns the loop variable, the body lines and the index of
+/// the line after `done`.
+fn integration_test_loop(lines: &[String]) -> Option<(String, Vec<String>, usize)> {
+    const GLOB: &str = "integration_test/*_test.dart";
+    let h = lines.iter().position(|l| l.starts_with("for "))?;
+    let (var, list) = lines[h]["for ".len()..].split_once(" in ")?;
+    let mut start = h + 1;
+    if list == format!("{GLOB}; do") {
+    } else if list == GLOB && lines.get(h + 1).is_some_and(|l| l == "do") {
+        start = h + 2;
+    } else {
+        return None;
+    }
+    let mut depth = 1;
+    for (i, l) in lines.iter().enumerate().skip(start) {
+        if ["for ", "while ", "until "]
+            .iter()
+            .any(|k| l.starts_with(k))
+        {
+            depth += 1;
+        }
+        if l == "done" || l.starts_with("done ") {
+            depth -= 1;
+            if depth == 0 {
+                return Some((var.to_string(), lines[start..i].to_vec(), i + 1));
+            }
+        }
+    }
+    None
+}
+
+/// Integration tests on the simulator with the tiny pack (plan M11 step 4). Accepted
+/// shapes (Leader, 2026-10-27, sim-hang fix):
+/// - the whole directory in one run: `flutter test integration_test …`, or
+/// - one run per file: `for f in integration_test/*_test.dart; do … flutter test "$f" …`
+///   (or `integration_test/"$name".dart` with `name=$(basename "$f" .dart)`), optionally
+///   behind a timeout wrapper (`run_with_timeout 420 flutter test …`).
+///
+/// Either way the `flutter test` line carries both pack defines, and a failing or
+/// timed-out file fails the step: with `set -e` in force (no `|| …`, pipefail if piped),
+/// or with the status captured (`rc=${PIPESTATUS[0]}`), checked (`[ $rc -ne 0 ]`) and
+/// turned into a non-zero `exit`, directly or via a variable checked after the loop.
+/// The loop must not skip files: exact glob, no `continue`/`break`, no condition in
+/// front of `flutter test`, no `nullglob`.
 #[test]
 fn m11_ios_yml_runs_the_integration_test_with_a_real_pack() {
     let y = read(IOS_YML);
     let (id, body) = sim_job(&y);
     let ss: Vec<String> = steps(&body).iter().map(|s| bare(s)).collect();
     let test = ss.iter().position(|s| runs_integration_tests(s)).unwrap();
-    let t = &ss[test];
+    let lines = shell_lines(&steps(&body)[test]);
+    let step = lines.join("\n");
     assert!(
-        t.contains("flutter test integration_test ") || t.ends_with("flutter test integration_test")
-            || t.contains("flutter test integration_test/ "),
-        "job {id}: run the whole integration_test dir, so the M6 panic/error-code tests run on iOS too \
-         (DoD: same FFI tests as Android)"
+        !step.contains("continue-on-error: true") && !step.contains("exit 0"),
+        "job {id}: the integration test step must be able to fail (no continue-on-error, no exit 0)"
     );
     assert!(
-        t.contains("RUSTLINE_M11_PACK_ZST="),
-        "job {id}: pass --dart-define=RUSTLINE_M11_PACK_ZST=<.rlp.zst> (m11_ios_test.dart)"
+        !step.contains("nullglob"),
+        "job {id}: no nullglob (an empty glob would run nothing and pass)"
     );
+
+    let whole_dir = lines.iter().position(|l| {
+        l.contains("flutter test integration_test ")
+            || l.ends_with("flutter test integration_test")
+            || l.contains("flutter test integration_test/ ")
+            || l.ends_with("flutter test integration_test/")
+    });
+    // (body lines, index of the flutter test line in them, lines after the loop, loop var)
+    let (scope, inv_at, after, var): (Vec<String>, usize, Vec<String>, Option<String>) =
+        if let Some(i) = whole_dir {
+            (lines.clone(), i, Vec::new(), None)
+        } else {
+            let (var, loop_body, end) = integration_test_loop(&lines).unwrap_or_else(|| {
+                panic!(
+                    "job {id}: run the whole integration_test dir (`flutter test integration_test`) \
+                     or loop over every file (`for f in integration_test/*_test.dart; do`), so the \
+                     M6 panic/error-code tests run on iOS too (DoD: same FFI tests as Android)"
+                )
+            });
+            let runs: Vec<usize> = (0..loop_body.len())
+                .filter(|&i| loop_body[i].contains("flutter test"))
+                .collect();
+            assert!(
+                runs.len() == 1,
+                "job {id}: the loop must run `flutter test` exactly once per file, found {}",
+                runs.len()
+            );
+            let i = runs[0];
+            assert!(
+                !loop_body
+                    .iter()
+                    .any(|l| has_word(l, "continue") || has_word(l, "break")),
+                "job {id}: the integration_test loop must not skip files (continue/break)"
+            );
+            for l in &loop_body[..i] {
+                assert!(
+                    !["if ", "case ", "[ ", "[[", "test ", "&&", "||"]
+                        .iter()
+                        .any(|k| l.contains(k)),
+                    "job {id}: no condition before flutter test in the loop (could skip files): {l}"
+                );
+            }
+            (loop_body, i, lines[end..].to_vec(), Some(var))
+        };
+    let inv = &scope[inv_at];
+
+    // What runs before `flutter test` on its line: nothing, or a timeout wrapper `<fn> <secs>`.
+    let (prefix, rest) = inv
+        .split_once("flutter test ")
+        .unwrap_or((inv.as_str(), ""));
+    let wrapper = match prefix.split_whitespace().collect::<Vec<_>>()[..] {
+        [] => None,
+        [w, secs]
+            if secs
+                .trim_end_matches(['s', 'm'])
+                .chars()
+                .all(|c| c.is_ascii_digit())
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
+        {
+            Some(w)
+        }
+        _ => panic!("job {id}: only a timeout wrapper may come before flutter test: {inv}"),
+    };
+    if let Some(v) = &var {
+        let target = rest.split(' ').next().unwrap_or_default();
+        let base = scope[..inv_at].iter().find_map(|l| {
+            let (n, rhs) = l.split_once('=')?;
+            let ok = rhs == format!("$(basename ${v} .dart)")
+                || rhs == format!("$(basename ${{{v}}} .dart)");
+            ok.then(|| n.to_string())
+        });
+        let per_file = target == format!("${v}")
+            || target == format!("${{{v}}}")
+            || base.is_some_and(|n| {
+                target == format!("integration_test/${n}.dart")
+                    || target == format!("integration_test/${{{n}}}.dart")
+            });
+        assert!(
+            per_file,
+            "job {id}: flutter test must run the loop's file (${v}), not a fixed one: {inv}"
+        );
+    }
+    check_pack_defines(&id, inv);
+    check_no_swallow(&id, inv);
+    if let Some(w) = wrapper {
+        if let Some(d) = lines.iter().position(|l| {
+            l.starts_with(&format!("{w}()")) || l.starts_with(&format!("function {w}"))
+        }) {
+            let def: Vec<&String> = lines[d..].iter().take_while(|l| *l != "}").collect();
+            assert!(
+                !def.iter().any(|l| l.contains("|| true")
+                    || l.contains("exit 0")
+                    || l.contains("exit(0)")),
+                "job {id}: the timeout wrapper {w} must pass the test's failure on"
+            );
+        }
+    }
+
+    // A failure in any file fails the step.
+    let piped = inv.replace("||", "").contains(" | ");
+    // `set -e` state at the flutter test line: the last `set +e` / `set -e` before it
+    // (before the loop, then inside the loop body).
+    let before: Vec<&String> = match &var {
+        None => scope[..inv_at].iter().collect(),
+        Some(_) => lines
+            .iter()
+            .take_while(|l| !l.starts_with("for "))
+            .chain(&scope[..inv_at])
+            .collect(),
+    };
+    let errexit_off = before
+        .iter()
+        .rev()
+        .find(|l| **l == "set +e" || **l == "set -e")
+        .is_some_and(|l| *l == "set +e");
+    let propagated = if !errexit_off {
+        // Default macOS run shell is `bash -e`: the step stops on the failing file.
+        !piped || step.contains("pipefail")
+    } else {
+        let status = scope.get(inv_at + 1).and_then(|l| {
+            let (x, rhs) = l.split_once('=')?;
+            let ok = rhs == "${PIPESTATUS[0]}" || (!piped && rhs == "$?");
+            ok.then(|| x.to_string())
+        });
+        status.is_some_and(|x| {
+            let checks = |l: &String| {
+                [" -ne 0", " != 0", " -gt 0"].iter().any(|op| {
+                    l.contains(&format!("${x}{op}")) || l.contains(&format!("${{{x}}}{op}"))
+                })
+            };
+            let Some(c) = scope.iter().skip(inv_at + 2).position(checks) else {
+                return false;
+            };
+            let then: Vec<&String> = scope[inv_at + 2 + c..]
+                .iter()
+                .take_while(|l| *l != "fi")
+                .collect();
+            if then.iter().any(|l| exits_nonzero(l)) {
+                return true;
+            }
+            // Recorded in a variable (failed=...), checked after the loop.
+            then.iter().filter_map(|l| l.split_once('=')).any(|(f, _)| {
+                let f = f.trim_end_matches('+');
+                let Some(k) = after.iter().position(|l| {
+                    l.contains(&format!("-n ${f}")) || l.contains(&format!("-n ${{{f}}}"))
+                }) else {
+                    return false;
+                };
+                after[k..]
+                    .iter()
+                    .take_while(|l| *l != "fi")
+                    .any(|l| exits_nonzero(l))
+            })
+        })
+    };
     assert!(
-        t.contains("RUSTLINE_M11_REQUIRE_PACK=true"),
-        "job {id}: pass --dart-define=RUSTLINE_M11_REQUIRE_PACK=true so a missing pack fails \
-         instead of skipping (else the job is green with nothing tested)"
+        propagated,
+        "job {id}: a failing or timed-out integration test file must fail the step (set -e, or \
+         rc=${{PIPESTATUS[0]}} checked and turned into a non-zero exit)"
     );
+
     let pack = ss
         .iter()
         .position(|s| s.contains("build-pack") && s.contains("data/fixtures/tiny"));

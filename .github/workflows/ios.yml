@@ -42,13 +42,19 @@ jobs:
   simulator:
     name: integration_test on iPhone 17 simulator
     runs-on: macos-26
-    timeout-minutes: 60
+    # About 7 min of setup, the test step's 45 and the log upload.
+    timeout-minutes: 55
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      # Test and simulator logs, uploaded at the end whatever happens.
+      - name: Log directory
+        run: |
+          echo "LOGS=$RUNNER_TEMP/ios-sim-logs" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ios-sim-logs"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
         with:
           toolchain: stable
@@ -78,14 +84,89 @@ jobs:
       - name: Pub get
         working-directory: rustline_flutter/example
         run: flutter pub get --enforce-lockfile
+      # One file at a time, each limited to 7 min, so a hang names its file.
+      # Flutter 3.47.8 can launch the app before its simulator log reader is
+      # up, miss the VM Service URL and wait forever (flutter/flutter#181771,
+      # fixed on master by flutter/flutter#193142). A file that times out
+      # stops the run; a file that fails does not.
       - name: Integration tests
         working-directory: rustline_flutter/example
+        timeout-minutes: 45
+        shell: bash --noprofile --norc -eo pipefail {0}
         env:
           UDID: ${{ steps.sim.outputs.udid }}
         run: |
-          flutter test integration_test -d "$UDID" \
-            --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
-            --dart-define=RUSTLINE_M11_REQUIRE_PACK=true
+          # The log stream leads its own process group (macOS has no setsid):
+          # perl execs it, so $! is both its pid and its group id.
+          perl -e 'setpgrp(0, 0); exec(@ARGV) or die "exec: $!";' \
+            xcrun simctl spawn "$UDID" log stream --level debug \
+            --predicate 'process == "Runner"' > "$LOGS/simulator.log" 2>&1 &
+          logpid=$!
+          # Kill the log stream's whole group, never this shell's own group.
+          stop_log() {
+            if [ "$(ps -o pgid= -p "$logpid" | tr -d ' ')" = "$logpid" ] &&
+              [ "$logpid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ]; then
+              kill -TERM -- "-$logpid" 2>/dev/null || true
+            else
+              kill -TERM "$logpid" 2>/dev/null || true
+            fi
+          }
+          trap stop_log EXIT
+          # macOS has no coreutils timeout: run "$@" in its own process group
+          # and kill the group (flutter, xcrun, log readers) after $1 seconds.
+          run_with_timeout() {
+            perl -e '
+              my $t = shift;
+              my $pid = fork() // die "fork: $!";
+              if ($pid == 0) { setpgrp(0, 0); exec(@ARGV) or die "exec: $!"; }
+              $SIG{ALRM} = sub {
+                kill("TERM", -$pid); sleep 10; kill("KILL", -$pid);
+                print STDERR "timed out after ${t}s\n"; exit 124;
+              };
+              alarm $t;
+              waitpid($pid, 0);
+              exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+            ' "$@"
+          }
+          # The files still to run.
+          set -- integration_test/*_test.dart
+          failed=""
+          for f in integration_test/*_test.dart; do
+            name=$(basename "$f" .dart)
+            echo "::group::$f"
+            set +e
+            run_with_timeout 420 flutter test integration_test/"$name".dart -d "$UDID" --verbose --reporter expanded \
+              --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
+              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true 2>&1 | tee "$LOGS/$name.log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            echo "::endgroup::"
+            shift
+            if [ "$rc" -eq 124 ]; then
+              echo "::error::$f: no result within 420 s; stopped. Not run: ${*:-none}"
+              xcrun simctl terminate "$UDID" ro.horiasav.rustlineFlutterExample 2>/dev/null || true
+              exit 1
+            fi
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::$f failed (exit $rc)"
+              failed="$failed $f"
+              xcrun simctl terminate "$UDID" ro.horiasav.rustlineFlutterExample 2>/dev/null || true
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::integration test files that failed:$failed"
+            exit 1
+          fi
+      # Crash reports of the app, if it died at launch.
+      - name: Collect crash reports
+        if: always()
+        run: cp ~/Library/Logs/DiagnosticReports/Runner* "$LOGS"/ 2>/dev/null || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: always()
+        with:
+          name: ios-sim-logs
+          path: ${{ env.LOGS }}
+          if-no-files-found: ignore
 
   device:
     name: flutter build ios --no-codesign (example and blank app)
