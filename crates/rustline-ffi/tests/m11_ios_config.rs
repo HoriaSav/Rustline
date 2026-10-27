@@ -702,3 +702,108 @@ fn m11_apple_crates_in_ffi_are_target_gated() {
         "Apple crates outside an Apple target table: {bad:?}"
     );
 }
+
+/// PR #15 Xcode link failure: cargokit's build_pod.dart lipo'd the static lib to
+/// `lib<package name>.a` (librustline-ffi.a), while cargo writes librustline_ffi.a and
+/// the podspec -force_loads `${BUILT_PRODUCTS_DIR}/librustline_ffi.a`. This replays
+/// build_pod.dart's name: it takes the `"lib$<var>.a"` output, follows `<var>` back to
+/// `environment.crateInfo.packageName` plus any `.replaceAll('x', 'y')` calls, applies
+/// them to the package name in the Cargo.toml that build_pod.sh is pointed at, and
+/// requires the podspec's -force_load and output_files (and ios.yml's size step) to
+/// name that same file.
+#[test]
+fn m11_build_pod_lib_name_matches_podspec_force_load() {
+    const BUILD_POD: &str = "rustline_flutter/cargokit/build_tool/lib/src/build_pod.dart";
+    let dart = read(BUILD_POD);
+    let code: String = dart
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The output file: path.join(outputDir, "lib$libName.a").
+    let var = code
+        .split("\"lib$")
+        .skip(1)
+        .find_map(|rest| rest.split_once(".a\"").map(|(v, _)| v.to_string()))
+        .unwrap_or_else(|| panic!("{BUILD_POD}: no \"lib$<name>.a\" output file"));
+    let decl = format!("final {var} =");
+    let expr = code
+        .split_once(&decl)
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .map(|(e, _)| e.split_whitespace().collect::<String>())
+        .unwrap_or_else(|| panic!("{BUILD_POD}: no `final {var} = ...;`"));
+    let mut chain = expr
+        .strip_prefix("environment.crateInfo.packageName")
+        .unwrap_or_else(|| {
+            panic!("{BUILD_POD}: {var} = {expr}, expected environment.crateInfo.packageName...")
+        });
+
+    // The package name build_pod.dart reads: [package] name of the manifest dir that
+    // the podspec passes to build_pod.sh (relative to rustline_flutter/ios).
+    let p = bare(&strip_comments(&read(PODSPEC)));
+    let manifest_dir = p
+        .split("build_pod.sh")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(|d| d.trim_matches(|c| c == '"' || c == '\'' || c == '\\'))
+        .unwrap_or_else(|| panic!("podspec: no build_pod.sh <manifest dir>"));
+    let cargo_toml = format!("rustline_flutter/ios/{manifest_dir}/Cargo.toml");
+    let toml = read(&cargo_toml);
+    let mut in_package = false;
+    let mut package = None;
+    for line in toml.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            in_package = l == "[package]";
+        } else if in_package && l.starts_with("name") {
+            package = l.split('"').nth(1).map(str::to_string);
+            break;
+        }
+    }
+    let package = package.unwrap_or_else(|| panic!("{cargo_toml}: no [package] name"));
+
+    let mut lib = package.clone();
+    while !chain.is_empty() {
+        let args = chain
+            .strip_prefix(".replaceAll(")
+            .and_then(|r| r.split_once(')'))
+            .unwrap_or_else(|| panic!("{BUILD_POD}: cannot replay `{chain}` in {var} = {expr}"));
+        let quoted: Vec<&str> = args.0.split(['\'', '"']).collect();
+        // ['', from, ',', to, ''] for ('from','to').
+        assert!(
+            quoted.len() == 5 && quoted[2] == ",",
+            "{BUILD_POD}: unexpected replaceAll args ({})",
+            args.0
+        );
+        lib = lib.replace(quoted[1], quoted[3]);
+        chain = args.1;
+    }
+    let built = format!("lib{lib}.a");
+    let cargo_writes = format!("lib{}.a", package.replace('-', "_"));
+    assert_eq!(
+        built, cargo_writes,
+        "{BUILD_POD} writes {built} but cargo builds {cargo_writes} \
+         (use packageName.replaceAll('-', '_'))"
+    );
+
+    let force_load = p
+        .split("-force_load")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(|f| f.trim_matches(|c| c == '"' || c == '\'' || c == ','))
+        .unwrap_or_else(|| panic!("podspec: no -force_load <file>"));
+    let force_load_file = force_load.rsplit('/').next().unwrap_or(force_load);
+    assert_eq!(
+        force_load_file, built,
+        "podspec -force_load {force_load} must name the file build_pod.dart writes ({built})"
+    );
+    assert!(
+        p.contains(&format!("${{BUILT_PRODUCTS_DIR}}/{built}")),
+        "podspec output_files/-force_load: ${{BUILT_PRODUCTS_DIR}}/{built}"
+    );
+    assert!(
+        bare(&strip_comments(&read(IOS_YML))).contains(&format!("rustline_flutter/{built}")),
+        "ios.yml size step must look for rustline_flutter/{built}"
+    );
+}

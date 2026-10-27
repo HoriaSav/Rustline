@@ -38,7 +38,7 @@ class VerifyBinaries {
 
         final artifacts = getArtifactNames(
           target: target,
-          libraryName: crateInfo.packageName,
+          libraryName: crateInfo.packageName.replaceAll('-', '_'),
           remote: true,
         );
 

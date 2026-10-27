@@ -55,7 +55,9 @@ class BuildPod {
         .where((element) => element.type == AritifactType.dylib)
         .toList();
 
-    final libName = environment.crateInfo.packageName;
+    // Rustline: cargo names the library after the crate with '-' as '_'
+    // (rustline-ffi -> librustline_ffi.a), the file the podspec's -force_load expects.
+    final libName = environment.crateInfo.packageName.replaceAll('-', '_');
 
     // If there is static lib, use it and link it with pod
     if (staticLibs.isNotEmpty) {
