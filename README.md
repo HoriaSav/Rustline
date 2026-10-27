@@ -133,7 +133,7 @@ flutter run -d "iPhone 17"               # or any booted arm64 simulator
 
 Install packs into the directory that `defaultPackDirectory()` returns: `packs/` under Application Support, created if missing. On iOS that directory is excluded from iCloud backup, because a pack can be downloaded again. If the exclusion fails, `defaultPackDirectory()` throws the `PlatformException` instead of returning a directory that would be backed up. Call it on every launch instead of saving the path, because the iOS container path changes between installs.
 
-To run the iOS integration tests on a simulator with a real pack, as `ios.yml` does:
+To run the iOS integration tests on a simulator with the same pack and defines as `ios.yml`:
 
 ```bash
 cargo run --locked --release -p rustline-cli -- build-pack --gtfs data/fixtures/tiny --out /tmp/pack --feed-id tiny
@@ -142,6 +142,8 @@ flutter test integration_test -d "iPhone 17" \
   --dart-define=RUSTLINE_M11_PACK_ZST="$(ls /tmp/pack/*.rlp.zst)" \
   --dart-define=RUSTLINE_M11_REQUIRE_PACK=true
 ```
+
+On Flutter 3.47.8, `flutter test -d <simulator>` can hang before the first test ([flutter/flutter#181771](https://github.com/flutter/flutter/issues/181771)). `ios.yml` therefore runs the file through XCTest with `xcodebuild test`.
 
 ## Usage
 
@@ -341,7 +343,7 @@ cargo test --locked --release -p rustline-osm --test m4_osm -- --ignored --nocap
 
 The Flutter plugin's integration tests run on an x86_64 android-34 emulator (AVD `rustline_x64`) locally, or in CI with `android-emulator.yml`. See [Continuous integration](#continuous-integration).
 
-The iOS integration tests run on an iPhone 17 simulator in `ios.yml` (see [Building on a Mac (iOS)](#building-on-a-mac-ios)). Without a Mac, `scripts/m11-ios-check.sh` runs the checks that work on Linux: actionlint on `ios.yml`, the static M11 config tests, `cargo check` and clippy of `rustline-ffi` for both iOS targets (Rust code only; C code goes through a stub compiler and nothing links), and the plugin's storage unit tests and `flutter analyze`.
+`ios.yml` runs `integration_test/m11_ios_test.dart` on an iPhone 17 simulator through XCTest (see [Building on a Mac (iOS)](#building-on-a-mac-ios)). Without a Mac, `scripts/m11-ios-check.sh` runs the checks that work on Linux: actionlint on `ios.yml`, the static M11 config tests, `cargo check` and clippy of `rustline-ffi` for both iOS targets (Rust code only; C code goes through a stub compiler and nothing links), and the plugin's storage unit tests and `flutter analyze`.
 
 ## Continuous integration
 
@@ -352,7 +354,7 @@ GitHub Actions workflows in `.github/workflows/`:
 | `ci.yml` (CI) | push to `main`, every pull request, manual | `rust`: `cargo fmt --check`, `clippy -D warnings`, tests debug + release (stable); `msrv`: tests on Rust 1.88; `flutter`: `flutter analyze` (plugin + example), plugin `flutter test`, and a check that `flutter_rust_bridge_codegen generate` (2.13.0) leaves no diff |
 | `android.yml` (Android) | push to `main`, every pull request, manual | `ffi`: `cargo ndk` release build of `rustline-ffi` for arm64-v8a and x86_64 on Rust 1.88, `.so` size in the job summary; `apk`: example `flutter build apk --release`, APK and `.so` sizes in the summary |
 | `android-emulator.yml` | manual only | example `integration_test` on an x86_64 API 34 emulator; pack-based tests print `skip:` (no pack) |
-| `ios.yml` (iOS) | pull requests and pushes to `main` that touch `rustline_flutter/`, `crates/`, Cargo files, `rust-toolchain.toml` or the tiny fixture; manual | macOS 26, Xcode 26.6. `simulator`: example `integration_test` on an iPhone 17 simulator with the tiny pack; `device`: `flutter build ios --release --no-codesign` of the example and of a blank app, sizes in the job summary and the `ios-size` artifact; `ffi`: `cargo test -p rustline-ffi` on macOS |
+| `ios.yml` (iOS) | pull requests and pushes to `main` that touch `rustline_flutter/`, `crates/`, Cargo files, `rust-toolchain.toml` or the tiny fixture; manual | macOS 26, Xcode 26.6. `simulator`: only `integration_test/m11_ios_test.dart`, with the tiny pack, on an iPhone 17 simulator, run through XCTest (`RunnerTests` with integration_test's iOS runner, one `xcodebuild test` per file) instead of `flutter test -d`, which hangs on Flutter 3.47.8 ([flutter/flutter#181771](https://github.com/flutter/flutter/issues/181771); the fix, [flutter/flutter#193142](https://github.com/flutter/flutter/pull/193142), is not in a stable release yet). A file passes only if its xcresulttool summary has passed > 0 and failed = skipped = 0. Swift Package Manager is off in this job, so plugins come in through CocoaPods; `device`: `flutter build ios --release --no-codesign` of the example and of a blank app, sizes in the job summary and the `ios-size` artifact; `ffi`: `cargo test -p rustline-ffi` on macOS |
 | `real-feeds.yml` | manual, and Mondays 04:00 UTC | fetches and verifies real feeds, then `cargo test --workspace --release` with them present |
 | `bench.yml` | manual only | `cargo bench -p rustline-core --bench plan` (spot checks; shared runners are noisy) |
 
@@ -439,6 +441,7 @@ GitHub Actions workflows in `.github/workflows/`:
 33. **No real iPhone** – tests run on a simulator; device builds are unsigned (`--no-codesign`) and have not been installed on a phone.
 34. **Slices and linkage** – arm64 only (no x86_64 simulator), and only dynamic frameworks (`use_frameworks!`); static linkage fails at `RustLib.init()`.
 35. **Stable Rust only on iOS** – `ios.yml` uses the stable toolchain; the iOS targets are not tested on the MSRV (1.88).
+36. **M6 integration tests need a Brașov pack** – the pack-based tests in `rustline_smoke`, `rustline_lifecycle`, `rustline_pack_safety`, `rustline_panic` and `rustline_perf` print `skip:` and return when `RUSTLINE_M6_PACK` (or `RUSTLINE_M6_PACK_ZST`) is unset, and still count as passed. CI has no feeds, so on `android-emulator.yml` they pass without really running, and the iOS simulator job does not run them at all.
 
 ## Similar projects
 

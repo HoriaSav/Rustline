@@ -42,8 +42,10 @@ jobs:
   simulator:
     name: integration_test on iPhone 17 simulator
     runs-on: macos-26
-    # About 7 min of setup, the test step's 45 and the log upload.
-    timeout-minutes: 55
+    # About 7 min of setup, the warm-up's 15, the test step's 10 and 5 for the
+    # crash reports and the log upload: 37, so 90 leaves 53 of slack (kept at
+    # 90 by Leader's R54 L1).
+    timeout-minutes: 90
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
@@ -81,17 +83,49 @@ jobs:
         with:
           model: iPhone 17
           wait_for_boot: true
+      # SwiftPM off for this job, before pub get writes the plugin list: then
+      # integration_test comes in through CocoaPods like rustline_flutter, and
+      # RunnerTests' `inherit! :search_paths` (Podfile) resolves
+      # `@import integration_test` now that RunnerTests no longer links
+      # FlutterGeneratedPluginSwiftPackage. Flutter leaves the pbxproj's package
+      # reference alone and generates that package empty.
       - name: Pub get
         working-directory: rustline_flutter/example
-        run: flutter pub get --enforce-lockfile
-      # One file at a time, each limited to 7 min, so a hang names its file.
-      # Flutter 3.47.8 can launch the app before its simulator log reader is
-      # up, miss the VM Service URL and wait forever (flutter/flutter#181771,
-      # fixed on master by flutter/flutter#193142). A file that times out
-      # stops the run; a file that fails does not.
+        run: |
+          flutter config --no-enable-swift-package-manager
+          flutter pub get --enforce-lockfile
+      # Pod install and the full app build (Rust included) once, outside the
+      # per-file cap; `xcodebuild test` in the loop reuses the products in the
+      # default DerivedData. Same file as the loop.
+      - name: Warm-up build
+        working-directory: rustline_flutter/example
+        timeout-minutes: 15
+        shell: bash --noprofile --norc -eo pipefail {0}
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          set -- integration_test/m11_ios_test.dart
+          {
+            flutter build ios --config-only --simulator "$1" \
+              --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
+              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true
+            xcodebuild build-for-testing -workspace ios/Runner.xcworkspace -scheme Runner \
+              -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
+              CODE_SIGNING_ALLOWED=NO
+          } 2>&1 | tee "$LOGS/warmup.log"
+      # Only m11_ios_test.dart: the M6 files (rustline_smoke, lifecycle,
+      # pack_safety, panic, perf) need a Brașov pack with streets that CI does
+      # not have, and without it they only soft-pass (known gap, R54 H2).
+      # One file at a time, each limited to 7 min, so a hang names its file:
+      # 1 file x 7 min plus 3.
+      # Runs through XCTest (integration_test's iOS runner, RunnerTests.m), not
+      # `flutter test -d`: Flutter 3.47.8 can launch the app before its
+      # simulator log reader is up, miss the VM Service URL and wait forever
+      # (flutter/flutter#181771, fixed on master by flutter/flutter#193142).
+      # A file that times out stops the run; a file that fails does not.
       - name: Integration tests
         working-directory: rustline_flutter/example
-        timeout-minutes: 45
+        timeout-minutes: 10
         shell: bash --noprofile --norc -eo pipefail {0}
         env:
           UDID: ${{ steps.sim.outputs.udid }}
@@ -128,18 +162,62 @@ jobs:
               exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
             ' "$@"
           }
+          # One file: point the Xcode project at it (FLUTTER_TARGET and the
+          # defines go into Generated.xcconfig; pod install), then build and
+          # run it through XCTest. One XCTest case per Dart test; a failing
+          # Dart test fails its case and xcodebuild.
+          test_file() {
+            flutter build ios --config-only --simulator integration_test/"$1".dart \
+              --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
+              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true &&
+              xcodebuild test -workspace ios/Runner.xcworkspace -scheme Runner \
+                -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
+                -parallel-testing-enabled NO -resultBundlePath "$LOGS/$1.xcresult" \
+                CODE_SIGNING_ALLOWED=NO
+          }
+          export -f test_file
+          # XCTest only reports the Dart tests whose body ran, and a run with
+          # none passes, so a file passes only if its result bundle exists and
+          # counts passed tests and no failed or skipped ones. The summary is
+          # kept as $LOGS/<name>.summary.json.
+          check_summary() {
+            local xr="$LOGS/$1.xcresult" js="$LOGS/$1.summary.json"
+            if [ ! -d "$xr" ]; then
+              echo "::error::$1: no result bundle ($xr)"
+              return 1
+            fi
+            if ! xcrun xcresulttool get test-results summary --path "$xr" > "$js"; then
+              echo "::error::$1: xcresulttool could not read $xr"
+              return 1
+            fi
+            cat "$js"
+            if ! python3 - "$js" <<'PY'
+          import json, sys
+          s = json.load(open(sys.argv[1]))
+          p, f, k = (s.get(n) for n in ("passedTests", "failedTests", "skippedTests"))
+          print(f"passed={p} failed={f} skipped={k}")
+          sys.exit(0 if isinstance(p, int) and p > 0 and f == 0 and k == 0 else 1)
+          PY
+            then
+              echo "::error::$1: needs passedTests > 0, failedTests 0, skippedTests 0"
+              return 1
+            fi
+          }
           # The files still to run.
-          set -- integration_test/*_test.dart
+          set -- integration_test/m11_ios_test.dart
           failed=""
-          for f in integration_test/*_test.dart; do
+          # shellcheck disable=SC2043 # one file for now (see above).
+          for f in integration_test/m11_ios_test.dart; do
             name=$(basename "$f" .dart)
             echo "::group::$f"
             set +e
-            run_with_timeout 420 flutter test integration_test/"$name".dart -d "$UDID" --verbose --reporter expanded \
-              --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
-              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true 2>&1 | tee "$LOGS/$name.log"
+            # shellcheck disable=SC2016 # $1 is the child bash's argument.
+            run_with_timeout 420 bash -c 'test_file "$1"' _ "$name" 2>&1 | tee "$LOGS/$name.log"
             rc=${PIPESTATUS[0]}
             set -e
+            if [ "$rc" -ne 124 ] && ! check_summary "$name" && [ "$rc" -eq 0 ]; then
+              rc=1
+            fi
             echo "::endgroup::"
             shift
             if [ "$rc" -eq 124 ]; then
