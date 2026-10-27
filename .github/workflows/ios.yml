@@ -1,0 +1,174 @@
+name: iOS
+
+# Plan M11: integration tests on an iPhone 17 simulator, a device build without
+# codesigning, the FFI tests on macOS and the app size vs a blank app. Public
+# repo, so standard macOS minutes are free; path filters keep it to iOS-relevant
+# changes. Not a required check (path-filtered workflows never report on
+# unrelated PRs).
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/ios.yml"
+      - "rustline_flutter/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "data/fixtures/tiny/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ios.yml"
+      - "rustline_flutter/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "data/fixtures/tiny/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  FLUTTER_VERSION: 3.47.8
+
+jobs:
+  simulator:
+    name: integration_test on iPhone 17 simulator
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      # cargokit builds the plugin in its own target dir under build/, so
+      # only the registry is worth caching.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: ios-sim
+          cache-targets: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2  # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Build the tiny pack
+        run: |
+          cargo run --locked --release -p rustline-cli -- build-pack --gtfs data/fixtures/tiny \
+            --out "$RUNNER_TEMP/pack" --feed-id tiny --built-at 1700000000
+          pack=$(ls "$RUNNER_TEMP"/pack/*.rlp.zst)
+          echo "PACK_ZST=$pack" >> "$GITHUB_ENV"
+      - uses: futureware-tech/simulator-action@c768f52966d5f70335ec77881f9806b24a52f80e  # v6
+        id: sim
+        with:
+          model: iPhone 17
+          wait_for_boot: true
+      - name: Pub get
+        working-directory: rustline_flutter/example
+        run: flutter pub get --enforce-lockfile
+      - name: Integration tests
+        working-directory: rustline_flutter/example
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          flutter test integration_test -d "$UDID" \
+            --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
+            --dart-define=RUSTLINE_M11_REQUIRE_PACK=true
+
+  device:
+    name: flutter build ios --no-codesign (example and blank app)
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: ios-device
+          cache-targets: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2  # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Build the example
+        working-directory: rustline_flutter/example
+        run: |
+          flutter pub get --enforce-lockfile
+          flutter build ios --release --no-codesign
+      # Baseline: a blank app from the same Flutter, built the same way.
+      - name: Build a blank app
+        run: |
+          flutter create --platforms=ios --project-name blank "$RUNNER_TEMP/blank"
+          cd "$RUNNER_TEMP/blank"
+          flutter build ios --release --no-codesign
+      - name: Size summary
+        working-directory: rustline_flutter/example
+        run: |
+          # Where the podspec's script phase puts it (OTHER_LDFLAGS -force_load).
+          lib=$(find build/ios -path "*/rustline_flutter/librustline_ffi.a" | head -n 1)
+          app=build/ios/iphoneos/Runner.app
+          fw="$app/Frameworks/rustline_flutter.framework"
+          blank="$RUNNER_TEMP/blank/build/ios/iphoneos/Runner.app"
+          if [ -z "$lib" ]; then
+            echo "::error::librustline_ffi.a not found under rustline_flutter/example/build/ios"
+            exit 1
+          fi
+          for p in "$fw" "$app" "$blank"; do
+            if [ ! -e "$p" ]; then
+              echo "::error::$p not found (did the build step produce it?)"
+              exit 1
+            fi
+          done
+          bytes() { find "$1" -type f -exec stat -f %z {} + | awk '{ s += $1 } END { print s + 0 }'; }
+          {
+            echo "| Item | Bytes |"
+            echo "|---|---|"
+            echo "| librustline_ffi.a (static, before linking) | $(bytes "$lib") |"
+            echo "| rustline_flutter.framework | $(bytes "$fw") |"
+            echo "| Runner.app (example) | $(bytes "$app") |"
+            echo "| Runner.app (blank app) | $(bytes "$blank") |"
+          } > ios-size.md
+          cat ios-size.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ios-size
+          path: rustline_flutter/example/ios-size.md
+
+  ffi:
+    name: cargo test rustline-ffi (macOS)
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: ios-ffi
+      - name: Test
+        run: cargo test --locked -p rustline-ffi

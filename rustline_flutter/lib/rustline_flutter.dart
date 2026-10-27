@@ -6,7 +6,8 @@ library;
 
 export 'src/planner.dart';
 export 'src/rust/api.dart';
-export 'src/rust/frb_generated.dart' show RustLib;
+export 'src/rust_lib.dart';
+export 'src/storage.dart';
 // For RustLib.init(externalLibrary: ...) when the library is not bundled
 // (host tests load target/release/librustline_ffi.so).
 export 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
