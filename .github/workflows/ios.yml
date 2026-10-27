@@ -108,7 +108,8 @@ jobs:
           {
             flutter build ios --config-only --simulator "$1" \
               --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
-              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true
+              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true \
+              --dart-define=RUSTLINE_M11_SIM_UDID="$UDID"
             xcodebuild build-for-testing -workspace ios/Runner.xcworkspace -scheme Runner \
               -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
               CODE_SIGNING_ALLOWED=NO
@@ -169,7 +170,8 @@ jobs:
           test_file() {
             flutter build ios --config-only --simulator integration_test/"$1".dart \
               --dart-define=RUSTLINE_M11_PACK_ZST="$PACK_ZST" \
-              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true &&
+              --dart-define=RUSTLINE_M11_REQUIRE_PACK=true \
+              --dart-define=RUSTLINE_M11_SIM_UDID="$UDID" &&
               xcodebuild test -workspace ios/Runner.xcworkspace -scheme Runner \
                 -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
                 -parallel-testing-enabled NO -resultBundlePath "$LOGS/$1.xcresult" \

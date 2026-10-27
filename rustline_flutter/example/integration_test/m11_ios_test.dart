@@ -37,30 +37,58 @@ void main() {
     if (dir.existsSync()) await dir.delete(recursive: true);
   });
 
+  String majorMinor(String v) => v.split('.').take(2).join('.');
+
   Set<String> names(Directory d) =>
       d.listSync().map((f) => f.uri.pathSegments.last).toSet();
 
   testWidgets('runs on an arm64 iOS simulator (records the device)', (t) async {
     final abi = Abi.current();
+    // From the AppDelegate (Dart's Platform.environment is empty on iOS).
+    final dev = await m11DeviceInfo();
+    final home = await m11HomeDirectory();
     // ignore: avoid_print
     print(
-      'm11: abi=$abi device=${Platform.environment['SIMULATOR_DEVICE_NAME']} '
-      'runtime=${Platform.environment['SIMULATOR_RUNTIME_VERSION']} '
-      'home=${Platform.environment['HOME']}',
+      'm11: abi=$abi name=${dev['simulatorDeviceName']} '
+      'model=${dev['simulatorModelIdentifier']} '
+      'runtime=${dev['simulatorRuntimeVersion']} '
+      'udid=${dev['simulatorUdid']} want_udid=$m11SimUdid home=$home '
+      'sim=${dev['isSimulator']} ui=${dev['deviceModel']} '
+      '${dev['systemName']} ${dev['systemVersion']}',
     );
     expect(abi, anyOf(Abi.iosArm64, Abi.iosX64));
     if (m11RequirePack) {
-      // CI (ios.yml): Apple Silicon runner, iPhone 17 simulator (plan M11 edge case
-      // "arm64-sim vs x86_64": the arm64 slice is the one CI can run).
-      expect(Platform.environment['SIMULATOR_DEVICE_NAME'], 'iPhone 17');
+      // CI (ios.yml): Apple Silicon runner (plan M11 edge case "arm64-sim vs
+      // x86_64": the arm64 slice is the one CI can run).
       expect(abi, Abi.iosArm64);
+      expect(dev['isSimulator'], isTrue);
+      expect(dev['deviceModel'], 'iPhone');
+      // The app runs on the simulator the workflow booted: ios.yml passes its
+      // UDID; the device name/model come from that simulator, not hard-coded
+      // here (runner images change).
+      expect(m11SimUdid, isNotEmpty, reason: 'RUSTLINE_M11_SIM_UDID unset');
+      expect(dev['simulatorUdid'], m11SimUdid);
+      expect(dev['simulatorDeviceName'], allOf(isA<String>(), isNotEmpty));
+      expect(dev['simulatorModelIdentifier'], allOf(isA<String>(), isNotEmpty));
+      expect(dev['simulatorRuntimeVersion'], allOf(isA<String>(), isNotEmpty));
+      // The env-only helpers agree with the raw map (they throw when unset).
+      expect(await m11SimulatorDeviceName(), dev['simulatorDeviceName']);
+      final runtime = await m11RuntimeVersion();
+      expect(runtime, dev['simulatorRuntimeVersion']);
+      // Runtime: the same major.minor as what iOS reports (one may carry a
+      // patch level the other lacks, e.g. 26.4 vs 26.4.1), and iOS 26 or later
+      // (Xcode 26.6 in ios.yml).
+      expect(dev['systemName'], 'iOS');
+      expect(majorMinor(runtime), majorMinor(dev['systemVersion']! as String));
+      expect(runtime, matches(RegExp(r'^\d+\.\d+(\.\d+)?$')));
+      expect(int.parse(runtime.split('.').first), greaterThanOrEqualTo(26));
     }
   }, skip: m11SkipReason != null);
 
   testWidgets('the pack dir is in Application Support of this container', (
     t,
   ) async {
-    final support = appSupportOracle().path;
+    final support = (await appSupportOracle()).path;
     final base = (await appPackDir()).path;
     expect(
       isWithin(support, base),
@@ -68,7 +96,7 @@ void main() {
       reason: '$base is not under $support',
     );
     // Not the backed-up, user-visible Documents, not the purgeable Caches/tmp.
-    final home = Platform.environment['HOME']!;
+    final home = await m11HomeDirectory();
     for (final bad in ['Documents', 'Library/Caches', 'tmp']) {
       expect(isWithin('$home/$bad', base), isFalse, reason: 'under $bad');
     }
@@ -83,7 +111,7 @@ void main() {
     if (z == null) return;
     final dest = '${dir.path}/tiny.rlp';
     await installForApp(z, dest);
-    expect(isWithin(appSupportOracle().path, dest), isTrue);
+    expect(isWithin((await appSupportOracle()).path, dest), isTrue);
     expect(names(dir), {'tiny.rlp', 'tiny.rlp.lock'});
     final e = await open(dest);
     final i = await info(e);

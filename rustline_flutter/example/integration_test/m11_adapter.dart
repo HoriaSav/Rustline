@@ -14,6 +14,8 @@
 //       data/fixtures/tiny with `rustline build-pack`; the simulator can read host
 //       paths)
 //   RUSTLINE_M11_REQUIRE_PACK=true  (ios.yml: a missing pack fails instead of skipping)
+//   RUSTLINE_M11_SIM_UDID=<UDID>  (ios.yml: the booted simulator; required with
+//       RUSTLINE_M11_REQUIRE_PACK=true)
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -30,6 +32,11 @@ const String? m11Skip = null; // M11 implemented (Builder, 2026-10-26).
 
 const m11PackZstPath = String.fromEnvironment('RUSTLINE_M11_PACK_ZST');
 const m11RequirePack = bool.fromEnvironment('RUSTLINE_M11_REQUIRE_PACK');
+
+/// The UDID of the simulator the workflow booted. With
+/// RUSTLINE_M11_REQUIRE_PACK=true it must be set, and the app's SIMULATOR_UDID
+/// must match it.
+const m11SimUdid = String.fromEnvironment('RUSTLINE_M11_SIM_UDID');
 
 /// Skip reason for every M11 test: not implemented yet, or not on iOS.
 String? get m11SkipReason =>
@@ -66,12 +73,44 @@ Future<void> installForApp(String srcZst, String dest) =>
 
 // ---- oracles (independent of the product code) -----------------------------
 
-/// `<container>/Library/Application Support`. iOS sets HOME to the app's data
-/// container, so this needs neither path_provider nor the plugin.
-Directory appSupportOracle() {
-  final home = Platform.environment['HOME'];
-  if (home == null || home.isEmpty) throw StateError('HOME unset');
-  return Directory('$home/Library/Application Support');
+/// `<container>/Library/Application Support`, from the native NSHomeDirectory()
+/// (the app's data container) over the example's method channel, so it needs
+/// neither path_provider nor the plugin. Dart's `Platform.environment` is always
+/// empty on iOS, so HOME can't come from there.
+Future<Directory> appSupportOracle() async =>
+    Directory('${await m11HomeDirectory()}/Library/Application Support');
+
+/// NSHomeDirectory() from the example's AppDelegate. Throws if unavailable.
+Future<String> m11HomeDirectory() => _m11String('homeDirectory');
+
+/// SIMULATOR_DEVICE_NAME (no fallback). Throws if unset or empty.
+Future<String> m11SimulatorDeviceName() => _m11String('simulatorDeviceName');
+
+/// SIMULATOR_RUNTIME_VERSION (no fallback). Throws if unset or empty.
+Future<String> m11RuntimeVersion() => _m11String('runtimeVersion');
+
+/// Raw device facts from the AppDelegate: `isSimulator` (compile-time
+/// targetEnvironment(simulator)), `simulatorDeviceName`,
+/// `simulatorModelIdentifier`, `simulatorRuntimeVersion`, `simulatorUdid` (the
+/// simulator's own variables, null when unset), and UIDevice's `deviceModel`,
+/// `systemName`, `systemVersion`. Throws if unavailable.
+Future<Map<String, Object?>> m11DeviceInfo() async {
+  final m = await _m11Channel.invokeMapMethod<String, Object?>('deviceInfo');
+  if (m == null || m.isEmpty) {
+    throw StateError('rustline_m11_test.deviceInfo returned ${m ?? 'null'}');
+  }
+  return m;
+}
+
+/// A non-empty string from the channel; null, empty or a missing handler throw.
+Future<String> _m11String(String method) async {
+  final v = await _m11Channel.invokeMethod<String>(method);
+  if (v == null || v.isEmpty) {
+    throw StateError(
+      'rustline_m11_test.$method returned ${v == null ? 'null' : 'empty'}',
+    );
+  }
+  return v;
 }
 
 /// Canonical path (resolves /var -> /private/var and the like) of an existing
@@ -93,9 +132,10 @@ bool isWithin(String parent, String child) {
   return b == a || b.startsWith('$a/');
 }
 
-/// Optional: a Swift handler in the example's AppDelegate answering
-/// `isExcludedFromBackup` with `URL(fileURLWithPath:).resourceValues(forKeys:
-/// [.isExcludedFromBackupKey]).isExcludedFromBackup`. Preferred when present.
+/// The example's AppDelegate handler: `isExcludedFromBackup` (with
+/// `URL(fileURLWithPath:).resourceValues(forKeys:
+/// [.isExcludedFromBackupKey]).isExcludedFromBackup`), `homeDirectory`,
+/// `simulatorDeviceName`, `runtimeVersion`, `deviceInfo`.
 const _m11Channel = MethodChannel('rustline_m11_test');
 
 /// Whether `path` itself carries the "exclude from backup" mark.
@@ -119,7 +159,7 @@ Future<bool> isExcludedFromBackup(String path) async {
 /// Excluded itself, or through a parent directory up to (and including)
 /// Application Support. Research suggests marking the pack subdir.
 Future<bool> excludedSelfOrParent(String path) async {
-  final root = canonical(appSupportOracle().path);
+  final root = canonical((await appSupportOracle()).path);
   var p = canonical(path);
   while (true) {
     if (await isExcludedFromBackup(p)) return true;

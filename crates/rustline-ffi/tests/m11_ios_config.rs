@@ -1945,3 +1945,407 @@ fn m11_build_pod_lib_name_matches_podspec_force_load() {
         "ios.yml size step must look for rustline_flutter/{built}"
     );
 }
+
+// ---- XCTest host environment (CI run 40500485826) ------------------------------
+//
+// Dart's `Platform.environment` is always empty on iOS (dart-lang/sdk
+// runtime/bin/platform_macos.cc), so HOME and the simulator's variables must come
+// from the example's AppDelegate over the `rustline_m11_test` channel.
+
+const APP_DELEGATE: &str = "rustline_flutter/example/ios/Runner/AppDelegate.swift";
+const M11_ADAPTER: &str = "rustline_flutter/example/integration_test/m11_adapter.dart";
+const M11_IOS_TEST: &str = "rustline_flutter/example/integration_test/m11_ios_test.dart";
+
+/// Drops `//` comments (Swift / Dart) outside string literals; keeps line breaks.
+fn strip_slash_comments(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let b = line.as_bytes();
+        let (mut q, mut cut) = (None::<u8>, line.len());
+        let mut i = 0;
+        while i < b.len() {
+            match (q, b[i]) {
+                (None, b'"' | b'\'') => q = Some(b[i]),
+                (Some(c), x) if x == c => q = None,
+                (Some(_), b'\\') => i += 1,
+                (None, b'/') if b.get(i + 1) == Some(&b'/') => {
+                    cut = i;
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push_str(&line[..cut]);
+        out.push('\n');
+    }
+    out
+}
+
+/// Body lines of `case "<name>":` in a Swift switch, up to the next `case`/`default:`
+/// at the same indent.
+fn swift_case(src: &str, name: &str) -> Vec<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let head = format!("case \"{name}\":");
+    let starts: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].trim() == head)
+        .collect();
+    assert_eq!(starts.len(), 1, "{APP_DELEGATE}: need exactly one `{head}`");
+    let at = indent(lines[starts[0]]);
+    lines[starts[0] + 1..]
+        .iter()
+        .take_while(|l| {
+            let t = l.trim();
+            !(indent(l) <= at && (t.starts_with("case ") || t == "default:" || t == "}"))
+        })
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Lines of the `{ … }` block opened on line `i` (exclusive), each with its depth
+/// relative to that block (1 = directly inside).
+fn brace_block(lines: &[&str], i: usize) -> Vec<(usize, String)> {
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    for (k, l) in lines[i..].iter().enumerate() {
+        let before = depth;
+        depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
+        if k > 0 {
+            if depth <= 0 {
+                break;
+            }
+            out.push((before.min(depth).max(1) as usize, l.trim().to_string()));
+        }
+    }
+    out
+}
+
+#[test]
+fn m11_app_delegate_exposes_the_xctest_host_facts() {
+    let src = strip_slash_comments(&read(APP_DELEGATE));
+    assert!(
+        src.contains("FlutterMethodChannel(name: \"rustline_m11_test\""),
+        "{APP_DELEGATE}: the rustline_m11_test channel"
+    );
+    assert!(
+        src.contains("let env = ProcessInfo.processInfo.environment"),
+        "{APP_DELEGATE}: env = ProcessInfo.processInfo.environment"
+    );
+    let ex = swift_case(&src, "isExcludedFromBackup").join("\n");
+    assert!(
+        ex.contains(".resourceValues(forKeys: [.isExcludedFromBackupKey])")
+            && ex.contains("result(values.isExcludedFromBackup ?? false)"),
+        "isExcludedFromBackup must still read Apple's resource value"
+    );
+    assert_eq!(
+        swift_case(&src, "homeDirectory"),
+        ["result(NSHomeDirectory())"],
+        "homeDirectory must answer NSHomeDirectory() only"
+    );
+    assert_eq!(
+        swift_case(&src, "simulatorDeviceName"),
+        ["result(env[\"SIMULATOR_DEVICE_NAME\"])"],
+        "simulatorDeviceName: the simulator's variable only (nil when unset), no UIDevice fallback"
+    );
+    assert_eq!(
+        swift_case(&src, "runtimeVersion"),
+        ["result(env[\"SIMULATOR_RUNTIME_VERSION\"])"],
+        "runtimeVersion: the simulator's variable only (nil when unset), no UIDevice fallback"
+    );
+    let di = swift_case(&src, "deviceInfo");
+    let sim = [
+        "#if targetEnvironment(simulator)",
+        "let isSimulator = true",
+        "#else",
+        "let isSimulator = false",
+        "#endif",
+    ];
+    assert!(
+        di.windows(sim.len()).any(|w| w == sim),
+        "deviceInfo: isSimulator from #if targetEnvironment(simulator) (true) / #else (false)"
+    );
+    assert!(
+        di.iter()
+            .any(|l| l == "let raw: (String) -> Any = { key in env[key] ?? NSNull() }"),
+        "deviceInfo: raw env values (NSNull when unset), no fallback"
+    );
+    for (key, val) in [
+        ("isSimulator", "isSimulator"),
+        ("simulatorDeviceName", "raw(\"SIMULATOR_DEVICE_NAME\")"),
+        (
+            "simulatorModelIdentifier",
+            "raw(\"SIMULATOR_MODEL_IDENTIFIER\")",
+        ),
+        (
+            "simulatorRuntimeVersion",
+            "raw(\"SIMULATOR_RUNTIME_VERSION\")",
+        ),
+        ("simulatorUdid", "raw(\"SIMULATOR_UDID\")"),
+        ("deviceModel", "UIDevice.current.model"),
+        ("systemName", "UIDevice.current.systemName"),
+        ("systemVersion", "UIDevice.current.systemVersion"),
+    ] {
+        let want = format!("\"{key}\": {val},");
+        assert_eq!(
+            di.iter()
+                .filter(|l| l.starts_with(&format!("\"{key}\":")))
+                .collect::<Vec<_>>(),
+            [&want],
+            "deviceInfo: {want}"
+        );
+    }
+    assert!(
+        di.iter().any(|l| l == "result(info)"),
+        "deviceInfo: result(info)"
+    );
+}
+
+#[test]
+fn m11_dart_harness_reads_host_facts_from_the_channel() {
+    for rel in [M11_ADAPTER, M11_IOS_TEST] {
+        let src = strip_slash_comments(&read(rel));
+        assert!(
+            !src.contains("Platform.environment"),
+            "{rel}: Platform.environment is always empty on iOS; use the channel"
+        );
+    }
+    let a = strip_slash_comments(&read(M11_ADAPTER));
+    let fa = flat(&a);
+    for want in [
+        "Future<Directory> appSupportOracle() async => Directory('${await m11HomeDirectory()}/Library/Application Support');",
+        "Future<String> m11HomeDirectory() => _m11String('homeDirectory');",
+        "Future<String> m11SimulatorDeviceName() => _m11String('simulatorDeviceName');",
+        "Future<String> m11RuntimeVersion() => _m11String('runtimeVersion');",
+        "final m = await _m11Channel.invokeMapMethod<String, Object?>('deviceInfo'); if (m == null || m.isEmpty) { throw StateError(",
+        "final v = await _m11Channel.invokeMethod<String>(method); if (v == null || v.isEmpty) { throw StateError(",
+        "const _m11Channel = MethodChannel('rustline_m11_test');",
+    ] {
+        assert!(fa.contains(want), "{M11_ADAPTER}: `{want}`");
+    }
+    // The channel helpers must not swallow a missing handler or a null answer.
+    let lines: Vec<&str> = a.lines().collect();
+    for head in [
+        "Future<String> _m11String(String method) async {",
+        "Future<Map<String, Object?>> m11DeviceInfo() async {",
+    ] {
+        let i = lines
+            .iter()
+            .position(|l| l.trim() == head)
+            .unwrap_or_else(|| panic!("{M11_ADAPTER}: `{head}`"));
+        let body: Vec<String> = brace_block(&lines, i).into_iter().map(|(_, l)| l).collect();
+        for l in &body {
+            assert!(
+                !l.contains("catch")
+                    && !l.starts_with("} on ")
+                    && !l.starts_with("try")
+                    && !(l.contains("?? ") && !l.starts_with("throw ")),
+                "{M11_ADAPTER}: `{head}` must not catch or default: `{l}`"
+            );
+        }
+        assert!(
+            body.iter().any(|l| l.starts_with("throw StateError(")),
+            "{M11_ADAPTER}: `{head}` must throw on null/empty"
+        );
+    }
+    assert_eq!(
+        fa.matches("await m11HomeDirectory()").count(),
+        1,
+        "appSupportOracle only"
+    );
+}
+
+/// A hard-coded simulator name or model id ('iPhone 17', iPhone18,3): the gate is
+/// the booted simulator's UDID instead (runner images change, R56).
+fn names_a_fixed_iphone(l: &str) -> bool {
+    let b = l.as_bytes();
+    l.match_indices("iPhone").any(|(i, _)| {
+        let rest = &b[i + 6..];
+        let rest = rest.strip_prefix(b" ").unwrap_or(rest);
+        rest.first().is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
+#[test]
+fn m11_ios_test_asserts_the_booted_simulator() {
+    let src = strip_slash_comments(&read(M11_IOS_TEST));
+    let lines: Vec<&str> = src.lines().collect();
+    let t = lines
+        .iter()
+        .position(|l| {
+            l.contains("testWidgets('runs on an arm64 iOS simulator (records the device)'")
+        })
+        .expect("the device test");
+    let body = brace_block(&lines, t);
+    let joined = body
+        .iter()
+        .map(|(_, l)| l.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        body.iter()
+            .any(|(d, l)| *d == 1 && l == "final dev = await m11DeviceInfo();"),
+        "device test: `final dev = await m11DeviceInfo();`"
+    );
+    for want in [
+        "name=${dev['simulatorDeviceName']}",
+        "model=${dev['simulatorModelIdentifier']}",
+        "udid=${dev['simulatorUdid']}",
+    ] {
+        assert!(joined.contains(want), "device test must log `{want}`");
+    }
+    // No way out before the CI block, and skipped only off iOS / before M11.
+    for (_, l) in &body {
+        assert!(
+            !l.split(|c: char| !c.is_alphanumeric())
+                .any(|w| w == "return"),
+            "device test must not return early: `{l}`"
+        );
+        assert!(
+            !names_a_fixed_iphone(l),
+            "device test: no hard-coded simulator name/model (gate on the UDID): `{l}`"
+        );
+    }
+    let close = lines.get(t + body.len() + 1).map(|l| l.trim());
+    assert_eq!(
+        close,
+        Some("}, skip: m11SkipReason != null);"),
+        "device test: skip only on m11SkipReason"
+    );
+    let rp = t + lines[t..]
+        .iter()
+        .position(|l| l.trim() == "if (m11RequirePack) {")
+        .expect("device test: if (m11RequirePack) {");
+    // Directly inside the CI block, not under another condition, in this order.
+    let ci: Vec<String> = brace_block(&lines, rp)
+        .into_iter()
+        .filter(|(d, _)| *d == 1)
+        .map(|(_, l)| l)
+        .collect();
+    let mut at = 0;
+    for want in [
+        "expect(abi, Abi.iosArm64);",
+        "expect(dev['isSimulator'], isTrue);",
+        "expect(m11SimUdid, isNotEmpty",
+        "expect(dev['simulatorUdid'], m11SimUdid);",
+        "expect(dev['simulatorDeviceName'], allOf(isA<String>(), isNotEmpty));",
+        "expect(dev['simulatorModelIdentifier'], allOf(isA<String>(), isNotEmpty));",
+        "expect(dev['simulatorRuntimeVersion'], allOf(isA<String>(), isNotEmpty));",
+        "expect(await m11SimulatorDeviceName(), dev['simulatorDeviceName']);",
+        "final runtime = await m11RuntimeVersion();",
+        "expect(runtime, dev['simulatorRuntimeVersion']);",
+        "expect(dev['systemName'], 'iOS');",
+        "expect(majorMinor(runtime), majorMinor(dev['systemVersion']! as String));",
+        "expect(runtime, matches(RegExp(r'^\\d+\\.\\d+(\\.\\d+)?$')));",
+        "expect(int.parse(runtime.split('.').first), greaterThanOrEqualTo(26));",
+    ] {
+        let k = ci[at..]
+            .iter()
+            .position(|l| {
+                if want.ends_with(';') {
+                    l == want
+                } else {
+                    l.starts_with(&format!("{want},")) || l.starts_with(&format!("{want})"))
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!("device test, directly in `if (m11RequirePack)` (in order): `{want}`")
+            });
+        at += k + 1;
+    }
+    // The UDID check is never conditional (an unset define fails, not skips).
+    for l in src.lines() {
+        let l = l.trim();
+        assert!(
+            !((l.starts_with("if ") || l.contains("? ") || l.contains("&&") || l.contains("||"))
+                && l.contains("m11SimUdid")),
+            "{M11_IOS_TEST}: the UDID check must not be conditional: `{l}`"
+        );
+    }
+    assert!(
+        flat(&src).contains("String majorMinor(String v) => v.split('.').take(2).join('.');"),
+        "majorMinor: the first two version fields"
+    );
+    let a = flat(&strip_slash_comments(&read(M11_ADAPTER)));
+    assert!(
+        a.contains("const m11SimUdid = String.fromEnvironment('RUSTLINE_M11_SIM_UDID');"),
+        "{M11_ADAPTER}: m11SimUdid from RUSTLINE_M11_SIM_UDID"
+    );
+}
+
+/// The `id:` of a workflow step, if any.
+fn step_id(step: &str) -> Option<String> {
+    step.lines()
+        .map(|l| l.trim().trim_start_matches("- ").trim())
+        .find_map(|l| l.strip_prefix("id:").map(|v| v.trim().to_string()))
+}
+
+#[test]
+fn m11_ios_yml_passes_the_booted_sim_udid_to_the_app() {
+    let y = strip_comments(&read(IOS_YML));
+    let (id, body) = sim_job(&y);
+    let st = steps(&body);
+    let boot = st
+        .iter()
+        .position(|s| s.contains("futureware-tech/simulator-action@"))
+        .unwrap_or_else(|| panic!("job {id}: the simulator-action boot step"));
+    let sim = step_id(&st[boot]).unwrap_or_else(|| panic!("job {id}: the boot step needs an id"));
+    let want_env = format!("UDID: ${{{{ steps.{sim}.outputs.udid }}}}");
+    let mut with_cfg = Vec::new();
+    for (k, s) in st.iter().enumerate() {
+        let sh = shell_lines(s);
+        let cfg: Vec<&String> = sh
+            .iter()
+            .filter(|l| l.contains("flutter build ios --config-only"))
+            .collect();
+        if cfg.is_empty() {
+            continue;
+        }
+        with_cfg.push(k);
+        assert!(k > boot, "job {id}: boot the simulator before step {k}");
+        for l in &cfg {
+            let defs: Vec<&str> = l
+                .split_whitespace()
+                .filter(|w| w.contains("RUSTLINE_M11_SIM_UDID"))
+                .collect();
+            assert!(
+                defs == ["--dart-define=RUSTLINE_M11_SIM_UDID=$UDID"]
+                    || defs == ["--dart-define=RUSTLINE_M11_SIM_UDID=${UDID}"],
+                "job {id}: every `flutter build ios --config-only` line must pass \
+                 --dart-define=RUSTLINE_M11_SIM_UDID=\"$UDID\" once; got {defs:?} in `{l}`"
+            );
+        }
+        // $UDID is the booted simulator's, set on this step and not reassigned.
+        assert_eq!(
+            s.lines().filter(|l| l.trim() == want_env).count(),
+            1,
+            "job {id}: step {k} needs env `{want_env}`"
+        );
+        for l in &sh {
+            for w in l.split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|') {
+                assert!(
+                    !(w.starts_with("UDID=") || w == "UDID"),
+                    "job {id}: step {k} must not reassign UDID: `{l}`"
+                );
+            }
+        }
+    }
+    let names: Vec<String> = with_cfg
+        .iter()
+        .map(|&k| {
+            st[k]
+                .lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("- name:")
+                        .map(|n| n.trim().to_string())
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["Warm-up build", "Integration tests"],
+        "job {id}: the config-only lines are the warm-up's and test_file's"
+    );
+}
