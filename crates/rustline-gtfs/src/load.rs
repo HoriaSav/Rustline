@@ -127,15 +127,16 @@ fn member<T>(
     }
     let file = std::fs::File::open(path).map_err(|e| bad(&e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| bad(&e))?;
-    let found = (0..zip.len()).find_map(|i| {
-        let f = zip.by_index(i).ok()?;
-        let n = f.name().to_string();
-        (Path::new(&n).file_name() == Some(std::ffi::OsStr::new(name))).then_some(n)
+    // Last match wins, as in gtfs-structures (later entries overwrite its map).
+    let found = (0..zip.len()).rev().find(|&i| {
+        zip.name_for_index(i)
+            .and_then(Result::ok)
+            .is_some_and(|n| Path::new(n.as_ref()).file_name() == Some(std::ffi::OsStr::new(name)))
     });
     let Some(found) = found else {
         return Err(missing());
     };
-    let mut entry = zip.by_name(&found).map_err(|e| bad(&e))?;
+    let mut entry = zip.by_index(found).map_err(|e| bad(&e))?;
     f(&mut entry)
 }
 
@@ -151,13 +152,14 @@ fn transfers_text(path: &Path) -> Result<Option<String>, Box<dyn std::error::Err
         std::fs::read(p)?
     } else {
         let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-        let name = (0..zip.len()).find_map(|i| {
-            let f = zip.by_index(i).ok()?;
-            let n = f.name().to_string();
-            (Path::new(&n).file_name() == Some(std::ffi::OsStr::new("transfers.txt"))).then_some(n)
+        // Last match wins, as in gtfs-structures (later entries overwrite its map).
+        let index = (0..zip.len()).rev().find(|&i| {
+            zip.name_for_index(i).and_then(Result::ok).is_some_and(|n| {
+                Path::new(n.as_ref()).file_name() == Some(std::ffi::OsStr::new("transfers.txt"))
+            })
         });
-        let Some(name) = name else { return Ok(None) };
-        let mut f = zip.by_name(&name)?;
+        let Some(index) = index else { return Ok(None) };
+        let mut f = zip.by_index(index)?;
         // A real transfers.txt is a few MB at most; refuse a zip bomb.
         const MAX: u64 = 256 << 20;
         let mut v = Vec::new();
