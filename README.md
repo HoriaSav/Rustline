@@ -315,7 +315,7 @@ Rustline needs no config file or secrets. These environment variables are used b
 | `ANDROID_NDK_HOME` | Android NDK path for `cargo ndk` builds | Android only |
 | `RUSTLINE_MANIFEST_FEED` | Feed used by the ignored real-feed tests | No |
 | `RUSTLINE_MANIFEST_COUNTS` | Expected `stops,routes,trips,stop_times,services,exceptions` for that feed | No |
-| `RUSTLINE_M9_SKIP_RATIO` | `1` skips only the 1.2× M8-base window-0 ratio in `m9_perf` (set by `real-feeds.yml`); absolute limits always apply | No |
+| `RUSTLINE_M9_REPORT_ONLY` | `1` makes the `m9_perf` speed budgets (1.2× M8-base window-0 ratio, 30 min depart-at and arrive-by p95 limits) report-only: `WARN` on a miss, failure only above 3× the limit (ratio 3.6×, Brașov 30 ms, MBTA 240 ms) (set by `real-feeds.yml`). The 2 s worst case and 20-result cap always apply | No |
 
 **Security:** Never commit real passwords, API keys, tokens, or other secrets to the repository.
 
@@ -356,7 +356,7 @@ GitHub Actions workflows in `.github/workflows/`:
 | `android.yml` (Android) | push to `main`, every pull request, manual | `ffi`: `cargo ndk` release build of `rustline-ffi` for arm64-v8a and x86_64 on Rust 1.88, `.so` size in the job summary; `apk`: example `flutter build apk --release`, APK and `.so` sizes in the summary |
 | `android-emulator.yml` | manual only | example `integration_test` on an x86_64 API 34 emulator; pack-based tests print `skip:` (no pack) |
 | `ios.yml` (iOS) | pull requests and pushes to `main` that touch `rustline_flutter/`, `crates/`, Cargo files, `rust-toolchain.toml` or the tiny fixture; manual | macOS 26, Xcode 26.6. `simulator`: only `integration_test/m11_ios_test.dart`, with the tiny pack, on an iPhone 17 simulator, run through XCTest (`RunnerTests` with integration_test's iOS runner, one `xcodebuild test` per file) instead of `flutter test -d`, which hangs on Flutter 3.47.8 ([flutter/flutter#181771](https://github.com/flutter/flutter/issues/181771); the fix, [flutter/flutter#193142](https://github.com/flutter/flutter/pull/193142), is not in a stable release yet). A file passes only if its xcresulttool summary has passed > 0 and failed = skipped = 0. Swift Package Manager is off in this job, so plugins come in through CocoaPods; `device`: `flutter build ios --release --no-codesign` of the example and of a blank app, sizes in the job summary and the `ios-size` artifact; `ffi`: `cargo test -p rustline-ffi` on macOS |
-| `real-feeds.yml` | manual, and Mondays 04:00 UTC | fetches and verifies real feeds, then `cargo test --workspace --release` with them present (M9 ratio printed, not asserted) |
+| `real-feeds.yml` | manual, and Mondays 04:00 UTC | fetches and verifies real feeds, then `cargo test --workspace --release` with them present (except `m9_perf`); `m9_perf` runs in its own single-threaded step with `RUSTLINE_M9_REPORT_ONLY=1`: speed-budget misses become `::warning` annotations and the step summary lists the measurements; it fails only above 3× a limit or on the 2 s worst case |
 | `bench.yml` | manual only | `cargo bench -p rustline-core --bench plan` (spot checks; shared runners are noisy) |
 
 - Pull requests use the read-only `GITHUB_TOKEN` and no secrets (`pull_request`, not `pull_request_target`). Failed runs are not retried automatically.
@@ -446,7 +446,7 @@ GitHub Actions workflows in `.github/workflows/`:
 
 **M9**
 
-37. **M9 ratio checked only locally** – the 1.2× M8-base ratio has no automatic run: run `cargo test --locked --release -p rustline-core --test m9_perf -- --nocapture --test-threads=1` on the reference machine before a perf-sensitive merge. `real-feeds.yml` sets `RUSTLINE_M9_SKIP_RATIO=1` and prints the ratio; `ci.yml` has no feeds.
+37. **M9 speed budgets checked only locally** – the 1.2× M8-base ratio and the 30 min p95 limits (Brașov 10 ms, MBTA 80 ms, depart-at and arrive-by) are enforced only locally: shared runners vary 1.5–2.7× in speed (real-feeds runs 41447544756, 41449646506 and 41460715351), so `real-feeds.yml` sets `RUSTLINE_M9_REPORT_ONLY=1`; a miss there is a `WARN` annotation, and the job fails only above 3× a limit (ratio 3.6×, Brașov 30 ms, MBTA 240 ms). Run `cargo test --locked --release -p rustline-core --test m9_perf -- --nocapture --test-threads=1` on the reference machine before a perf-sensitive merge. `ci.yml` has no feeds.
 
 ## Similar projects
 

@@ -47,9 +47,25 @@ jobs:
       # SKIP; their tests skip.
       - name: Fetch and verify fixtures
         run: scripts/fetch-fixtures.sh --skip-manual
+      # m9_perf runs in its own single-threaded step below.
       - name: Test (release)
-        # Runner speed differs from the machine the M9 ratio base was measured
-        # on; m9_perf keeps its absolute limits and only prints the ratio.
+        run: cargo test --locked --workspace --release -- --skip m9::budget_ --skip m9::worst_case_mbta
+      # Shared runners vary in speed (README Known gap 37): the M9 speed
+      # budgets print WARN (as annotations) and fail only above 3× the limit;
+      # the 2 s worst case and 20-result cap always apply.
+      - name: M9 perf report
         env:
-          RUSTLINE_M9_SKIP_RATIO: "1"
-        run: cargo test --locked --workspace --release
+          RUSTLINE_M9_REPORT_ONLY: "1"
+        run: |
+          # Keep the exit code so the summary and annotations are written
+          # even when the test fails.
+          rc=0
+          cargo test --locked --release -p rustline-core --test m9_perf -- --nocapture --test-threads=1 2>&1 | tee m9_perf.log || rc=$?
+          {
+            echo '### M9 perf'
+            echo '```'
+            grep -E 'p95|worst case|WARN:' m9_perf.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -o 'WARN: .*' m9_perf.log | sed 's/^WARN: /::warning title=M9 budget::/' || true
+          exit "$rc"
