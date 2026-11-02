@@ -48,4 +48,8 @@ jobs:
       - name: Fetch and verify fixtures
         run: scripts/fetch-fixtures.sh --skip-manual
       - name: Test (release)
+        # Runner speed differs from the machine the M9 ratio base was measured
+        # on; m9_perf keeps its absolute limits and only prints the ratio.
+        env:
+          RUSTLINE_M9_SKIP_RATIO: "1"
         run: cargo test --locked --workspace --release
