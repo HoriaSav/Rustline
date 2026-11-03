@@ -68,6 +68,17 @@ pub struct Trip {
     pub approximate: bool,
     /// `block_id` (empty when not given). Stored for later in-seat transfers.
     pub block_id: String,
+    /// Its shape from shapes.txt, when the stops could be placed on it.
+    pub shape: Option<TripShape>,
+}
+
+/// Where a trip runs: a shape and how far along it each stop lies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TripShape {
+    /// Index into [`Timetable::shapes`].
+    pub shape: u32,
+    /// Metres from the shape's first point, one per stop time, never decreasing.
+    pub at_m: Vec<f64>,
 }
 
 /// Arrival and departure of a trip at one stop.
@@ -145,6 +156,8 @@ pub struct Timetable {
     pub patterns: Vec<Pattern>,
     /// transfers.txt rows between known stops, sorted by (from, to).
     pub transfers: Vec<Transfer>,
+    /// The shapes trips use, as `(lat, lon)` in 1e-7 degrees (the pack's precision).
+    pub shapes: Vec<Vec<(i32, i32)>>,
     /// IANA timezone from `agency_timezone`, e.g. "America/New_York".
     pub timezone: String,
     /// First day any service runs.

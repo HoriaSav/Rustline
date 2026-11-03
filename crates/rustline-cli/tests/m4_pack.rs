@@ -55,7 +55,8 @@ fn older_versions_are_rejected_clearly() {
     let c = city_pack(true);
     let b = rlp_bytes(&c);
     let n = b.len();
-    for v in (1..FORMAT_VERSION).chain([FORMAT_VERSION + 1, u16::MAX]) {
+    // v4 still loads (without transit shapes); older ones do not.
+    for v in (1..4).chain([FORMAT_VERSION + 1, u16::MAX]) {
         let mut x = b.clone();
         x[4..6].copy_from_slice(&v.to_le_bytes());
         let crc = crc32(&x[..n - 4]);

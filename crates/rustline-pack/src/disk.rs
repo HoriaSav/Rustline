@@ -15,7 +15,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::data::{check_arrays, ArchivedTimetableData, Arrays, A, SERVICE_WORDS_AT};
-use crate::PackError;
+use crate::{PackError, TransitShapes};
 
 /// Bytes read from the file at a time.
 const PAGE: u64 = 64 * 1024;
@@ -213,6 +213,21 @@ impl DiskStreets {
             start = end;
         }
         Ok(())
+    }
+
+    /// [`TransitShapes::check`] against this body's trips and patterns.
+    pub(crate) fn check_shapes(&self, shapes: &TransitShapes) -> Result<(), PackError> {
+        let b = &self.0;
+        let stops = |t: usize| -> Option<usize> {
+            // range: u32 fits usize on every target we build (≥ 32-bit).
+            let p = b.u32_at(A::TripPattern, t).ok()? as usize;
+            let s = b.u32_at(A::PatternStopsStart, p).ok()?;
+            let e = b.u32_at(A::PatternStopsStart, p + 1).ok()?;
+            Some(e.checked_sub(s)? as usize)
+        };
+        shapes
+            .check(b.len(A::TripIds), stops)
+            .map_err(PackError::Corrupt)
     }
 }
 

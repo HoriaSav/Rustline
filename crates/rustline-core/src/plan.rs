@@ -19,6 +19,10 @@
 //! the real distance between the days. Every output time is an instant with
 //! the feed zone's offset at that moment.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use chrono::{DateTime, Days, FixedOffset, NaiveDate};
 use rustline_model::LatLon;
 use rustline_pack::Pack;
@@ -250,7 +254,8 @@ pub enum Leg {
         board: DateTime<FixedOffset>,
         /// Arrival.
         alight: DateTime<FixedOffset>,
-        /// The stops passed, as a line (no shapes.txt yet).
+        /// The trip's shape (shapes.txt) from the boarding to the alighting
+        /// stop; the stops passed, as a line, when the pack has no shape for it.
         geometry: Option<Polyline>,
     },
 }
@@ -368,6 +373,7 @@ pub(crate) fn plan(
         pack,
         streets,
         speed: req.walk_speed_mps,
+        shapes: RefCell::default(),
     };
 
     // Access and egress walks.
@@ -757,6 +763,14 @@ struct Query<'a> {
     pack: &'a Pack,
     streets: Option<&'a Streets>,
     speed: f64,
+    /// Shapes decoded so far: points and metres along the line at each.
+    shapes: RefCell<HashMap<usize, Rc<ShapeLine>>>,
+}
+
+/// A decoded transit shape: its points and the metres along it at each.
+struct ShapeLine {
+    points: Vec<LatLon>,
+    cum: Vec<f64>,
 }
 
 impl Query<'_> {
@@ -856,6 +870,79 @@ impl Query<'_> {
                 vec![a, b],
             )
         })
+    }
+
+    /// The part of `trip`'s shape between its stop times `a` and `b` (at
+    /// stops `board` and `alight`), from the boarding to the alighting stop's
+    /// exact position; `None` when the pack has no shape for it (a v4 pack, a
+    /// feed without shapes.txt, or stops too far from the line at build time).
+    fn shape_slice(
+        &self,
+        trip: usize,
+        (a, b): (usize, usize),
+        (board, alight): (u32, u32),
+    ) -> Option<Vec<LatLon>> {
+        let shapes = &self.pack.timetable().transit_shapes;
+        let (shape, cut) = shapes.trip_cut(trip)?;
+        let (from, to) = (
+            f64::from(*cut.get(a)?) / 10.0,
+            f64::from(*cut.get(b)?) / 10.0,
+        );
+        if to <= from {
+            return None;
+        }
+        let (board, alight) = (
+            self.stop_pos(board as usize)?,
+            self.stop_pos(alight as usize)?,
+        );
+        let cached = self.shapes.borrow().get(&shape).cloned();
+        let l = match cached {
+            Some(l) => l,
+            None => {
+                let points = shapes.points(shape)?;
+                let cum = rustline_pack::cumulative_m(&points);
+                let points = points
+                    .iter()
+                    .map(|p| LatLon::new(f64::from(p.0) * 1e-7, f64::from(p.1) * 1e-7))
+                    .collect();
+                let l = Rc::new(ShapeLine { points, cum });
+                self.shapes.borrow_mut().insert(shape, l.clone());
+                l
+            }
+        };
+        let (points, cum) = (&l.points, &l.cum);
+        // The point `m` metres along the line.
+        let at = |m: f64| {
+            let j = cum.partition_point(|&c| c <= m).clamp(1, points.len() - 1);
+            let (p, q) = (points[j - 1], points[j]);
+            let len = cum[j] - cum[j - 1];
+            let f = if len > 0.0 {
+                ((m - cum[j - 1]) / len).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            LatLon::new(p.lat + f * (q.lat - p.lat), p.lon + f * (q.lon - p.lon))
+        };
+        // The stops themselves at the ends, so the ride joins the walks; the
+        // cut points only when they are more than a metre from them. Cuts are
+        // in decimetres, so a vertex within a metre of an end is that end.
+        let (start, end) = (at(from), at(to));
+        let mut line = vec![board];
+        if haversine_m(board, start) > 1.0 {
+            line.push(start);
+        }
+        line.extend(
+            points
+                .iter()
+                .zip(cum)
+                .filter(|&(_, &c)| from + 1.0 < c && c < to - 1.0)
+                .map(|(&p, _)| p),
+        );
+        if haversine_m(alight, end) > 1.0 {
+            line.push(end);
+        }
+        line.push(alight);
+        Some(line)
     }
 
     fn stop_ref(&self, s: u32) -> StopRef {
@@ -1005,10 +1092,14 @@ impl Query<'_> {
                             (a <= b).then_some((a, b))
                         });
                         match span {
-                            Some((a, b)) => times[a..=b]
-                                .iter()
-                                .filter_map(|s| self.stop_pos(s.0 as usize))
-                                .collect(),
+                            Some((a, b)) => self
+                                .shape_slice(i, (a, b), (times[a].0, times[b].0))
+                                .unwrap_or_else(|| {
+                                    times[a..=b]
+                                        .iter()
+                                        .filter_map(|s| self.stop_pos(s.0 as usize))
+                                        .collect()
+                                }),
                             None => Vec::new(),
                         }
                     };

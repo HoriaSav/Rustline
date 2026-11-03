@@ -10,7 +10,10 @@ pub enum PackError {
     #[error("not a Rustline pack (bad magic bytes)")]
     BadMagic,
     /// The pack was written by a different (usually newer) format version.
-    #[error("pack format version {found} is not supported (this build reads version {supported})")]
+    #[error(
+        "pack format version {found} is not supported (this build reads versions {} to {supported})",
+        crate::OLDEST_VERSION
+    )]
     UnsupportedVersion {
         /// Version in the file.
         found: u16,
