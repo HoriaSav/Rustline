@@ -16,6 +16,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "data/fixtures/tiny/**"
+      - "scripts/ci-changes.sh"
   push:
     branches: [main]
     paths:
@@ -26,6 +27,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "data/fixtures/tiny/**"
+      - "scripts/ci-changes.sh"
 
 permissions:
   contents: read
@@ -39,8 +41,43 @@ env:
   FLUTTER_VERSION: 3.47.8
 
 jobs:
+  # Per-change selection (scripts/ci-changes.sh): a PR runs only the jobs
+  # and crates its changed paths reach. Push to main and manual runs are
+  # full unless the push is docs only. Skipped jobs report success.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ios: ${{ steps.sel.outputs.ios }}
+      flutter: ${{ steps.sel.outputs.flutter }}
+      ffi: ${{ steps.sel.outputs.ffi }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select
+        id: sel
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Preinstalled toolchain: cargo metadata only, no components.
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            git diff --no-renames --name-only "$BASE...HEAD" | scripts/ci-changes.sh
+          elif [ "$EVENT" = push ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git diff --no-renames --name-only "$BASE" HEAD | scripts/ci-changes.sh --full
+          else
+            scripts/ci-changes.sh --full < /dev/null
+          fi | tee -a "$GITHUB_OUTPUT"
+
   simulator:
     name: integration_test on iPhone 17 simulator
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
     runs-on: macos-26
     # About 7 min of setup, the warm-up's 15, the test step's 10 and 5 for the
     # crash reports and the log upload: 37, so 90 leaves 53 of slack (kept at
@@ -250,6 +287,8 @@ jobs:
 
   device:
     name: flutter build ios --no-codesign (example and blank app)
+    needs: changes
+    if: needs.changes.outputs.flutter == 'true'
     runs-on: macos-26
     timeout-minutes: 45
     env:
@@ -317,6 +356,8 @@ jobs:
 
   ffi:
     name: cargo test rustline-ffi (macOS)
+    needs: changes
+    if: needs.changes.outputs.ffi == 'true'
     runs-on: macos-26
     timeout-minutes: 30
     env:

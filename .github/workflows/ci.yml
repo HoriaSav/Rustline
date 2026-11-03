@@ -26,8 +26,43 @@ env:
   FRB_VERSION: 2.13.0
 
 jobs:
+  # Per-change selection (scripts/ci-changes.sh): a PR runs only the jobs
+  # and crates its changed paths reach. Push to main and manual runs are
+  # full unless the push is docs only. Skipped jobs report success.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.sel.outputs.rust }}
+      cargo_args: ${{ steps.sel.outputs.cargo_args }}
+      flutter: ${{ steps.sel.outputs.flutter }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select
+        id: sel
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Preinstalled toolchain: cargo metadata only, no components.
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            git diff --no-renames --name-only "$BASE...HEAD" | scripts/ci-changes.sh
+          elif [ "$EVENT" = push ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git diff --no-renames --name-only "$BASE" HEAD | scripts/ci-changes.sh --full
+          else
+            scripts/ci-changes.sh --full < /dev/null
+          fi | tee -a "$GITHUB_OUTPUT"
+
   rust:
     name: fmt, clippy, test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -43,14 +78,16 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked ${{ needs.changes.outputs.cargo_args }} --all-targets -- -D warnings
       - name: Test (debug)
-        run: cargo test --locked --workspace
+        run: cargo test --locked ${{ needs.changes.outputs.cargo_args }}
       - name: Test (release)
-        run: cargo test --locked --workspace --release
+        run: cargo test --locked ${{ needs.changes.outputs.cargo_args }} --release
 
   msrv:
     name: MSRV 1.88 test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -70,10 +107,12 @@ jobs:
         run: rustc --version
       # Builder checklist 2: `cargo +1.88 test --locked --workspace`.
       - name: Test
-        run: cargo +1.88 test --locked --workspace
+        run: cargo +1.88 test --locked ${{ needs.changes.outputs.cargo_args }}
 
   flutter:
     name: flutter analyze, test, FRB up to date
+    needs: changes
+    if: needs.changes.outputs.flutter == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

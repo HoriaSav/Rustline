@@ -21,8 +21,41 @@ env:
   FLUTTER_VERSION: 3.47.8
 
 jobs:
+  # Per-change selection (scripts/ci-changes.sh): a PR runs only the jobs
+  # and crates its changed paths reach. Push to main and manual runs are
+  # full unless the push is docs only. Skipped jobs report success.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      flutter: ${{ steps.sel.outputs.flutter }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select
+        id: sel
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Preinstalled toolchain: cargo metadata only, no components.
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            git diff --no-renames --name-only "$BASE...HEAD" | scripts/ci-changes.sh
+          elif [ "$EVENT" = push ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git diff --no-renames --name-only "$BASE" HEAD | scripts/ci-changes.sh --full
+          else
+            scripts/ci-changes.sh --full < /dev/null
+          fi | tee -a "$GITHUB_OUTPUT"
+
   ffi:
     name: cargo ndk ${{ matrix.abi }}
+    needs: changes
+    if: needs.changes.outputs.flutter == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -67,6 +100,8 @@ jobs:
 
   apk:
     name: flutter build apk --release (example)
+    needs: changes
+    if: needs.changes.outputs.flutter == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
