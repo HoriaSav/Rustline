@@ -261,7 +261,7 @@ pub(crate) fn stop_times(
             "stop_id",
             "stop_sequence",
         ],
-        &["pickup_type", "drop_off_type"],
+        &["pickup_type", "drop_off_type", "shape_dist_traveled"],
     )?;
     let mut out = Vec::new();
     let mut unknown_stop = HashSet::new();
@@ -291,6 +291,8 @@ pub(crate) fn stop_times(
             stop_sequence: seq.unwrap_or_default(),
             pickup_type: pickup(&v[5]),
             drop_off_type: pickup(&v[6]),
+            // Optional: a bad value only costs the trip its shape positions.
+            shape_dist_traveled: v[7].parse::<f32>().ok().filter(|d| d.is_finite()),
             ..Default::default()
         });
     })?;

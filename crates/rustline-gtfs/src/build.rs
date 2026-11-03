@@ -15,6 +15,7 @@ use gtfs_structures::{ExactTimes, Exception, LocationType, RouteType};
 use rustline_model::{LatLon, PatternIdx, RouteIdx, Seconds, ServiceIdx, StopIdx, TripIdx};
 
 use crate::report::ReportBuilder;
+use crate::shapes::Shapes;
 use crate::timetable::{
     Pattern, Route, Service, Stop, StopKind, StopTime, Timetable, Transfer, Trip,
 };
@@ -48,6 +49,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
     trip_ids.sort();
     let mut trips = Vec::new();
     let mut stop_times = Vec::new();
+    let mut shapes = Shapes::default();
     // Trips and stop times generated from frequencies.txt so far (capped).
     let (mut gen_trips, mut gen_times) = (0u64, 0u64);
     for id in trip_ids {
@@ -64,6 +66,8 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
             continue;
         };
         let headsign = raw.trip_headsign.clone().unwrap_or_default();
+        // Frequency trips run the template's stops, so they share its shape.
+        let shape = shapes.trip(g, raw, &times, &stops);
         let mut push = |trip_id: String, times: &[StopTime], approximate: bool| {
             let start = stop_times.len() as u32;
             stop_times.extend_from_slice(times);
@@ -76,6 +80,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
                 pattern: PatternIdx(u32::MAX), // set by build_patterns
                 approximate,
                 block_id: raw.block_id.clone().unwrap_or_default(),
+                shape: shape.clone(),
             });
         };
         if raw.frequencies.is_empty() {
@@ -161,6 +166,7 @@ pub fn build_timetable(feed: &RawFeed) -> Result<(Timetable, ValidationReport), 
         services,
         patterns: Vec::new(),
         transfers,
+        shapes: shapes.used,
         timezone,
         valid_from,
         valid_to,

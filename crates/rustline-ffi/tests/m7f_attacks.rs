@@ -93,7 +93,7 @@ fn crafted_downloads_keep_the_old_pack() {
     let mut magic = good.clone();
     magic[0] = b'X';
     cases.push(("bad magic", z(&magic), &["pack_corrupt"]));
-    for v in [1u16, 3, 5, u16::MAX] {
+    for v in [1u16, 3, rustline_pack::FORMAT_VERSION + 1, u16::MAX] {
         let mut b = good.clone();
         b[4..6].copy_from_slice(&v.to_le_bytes());
         cases.push((

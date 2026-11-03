@@ -8,6 +8,8 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+use crate::TransitShapes;
+
 /// Marks a stop without coordinates in `stop_lat`/`stop_lon` (bits of `f64::NAN`).
 pub const NO_COORD: u64 = 0x7FF8_0000_0000_0000;
 
@@ -27,7 +29,7 @@ pub const STREET_MAX_LAT: f64 = 85.0;
 pub const SEG_LEN_TOLERANCE: f64 = 0.01;
 
 /// Great-circle distance in metres between two points in 1e-7 degrees.
-fn haversine_e7(a: (i32, i32), b: (i32, i32)) -> f64 {
+pub fn haversine_e7(a: (i32, i32), b: (i32, i32)) -> f64 {
     let d = |v: i32| f64::from(v) * 1e-7;
     let (la1, la2) = (d(a.0).to_radians(), d(b.0).to_radians());
     let h = ((la2 - la1) / 2.0).sin().powi(2)
@@ -158,6 +160,12 @@ pub struct TimetableData {
     /// Bit d of service s (word `s * service_words + d / 64`) is set when it
     /// runs on day `valid_from + d`.
     pub service_bits: Vec<u64>,
+
+    // ---- transit shapes (v5) ----
+    /// Not part of this archive: written after it as its own section, so the
+    /// body keeps the v4 layout (see `write_pack`). Empty for a v4 pack.
+    #[rkyv(with = rkyv::with::Skip)]
+    pub transit_shapes: TransitShapes,
 }
 
 impl TimetableData {
@@ -278,7 +286,11 @@ impl TimetableData {
     /// Checks that all arrays fit together, so later indexing can't go out
     /// of bounds. Returns what is wrong as text.
     pub fn check(&self) -> Result<(), String> {
-        check_arrays(self)
+        check_arrays(self)?;
+        self.transit_shapes.check(self.trip_count(), |t| {
+            let p = *self.trip_pattern.get(t)?;
+            Some(self.pattern_stops(p as usize).len())
+        })
     }
 }
 

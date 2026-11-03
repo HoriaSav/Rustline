@@ -42,7 +42,7 @@ It is a standalone Rust library first; the RoTransit Flutter app (Brașov and ot
 ## Features
 
 - **GTFS ingest** — loads any GTFS feed (zip or directory) and prints counts, timezone, validity window, patterns and a validation report (`rustline inspect`, `--json` available).
-- **Reproducible routing packs** — `rustline build-pack` writes `rustline-{feedId}-{sha12}-v4.rlp` and `.rlp.zst`; `--built-at` / `SOURCE_DATE_EPOCH` gives byte-identical packs. Bad files return errors, never panic.
+- **Reproducible routing packs** — `rustline build-pack` writes `rustline-{feedId}-{sha12}-v5.rlp` and `.rlp.zst`; `--built-at` / `SOURCE_DATE_EPOCH` gives byte-identical packs. Bad files return errors, never panic. Format v5 adds GTFS shapes (shapes.txt), so a ride leg follows the line the vehicle drives. v4 packs still load; their ride legs fall back to straight lines between the stops passed.
 - **RAPTOR stop-to-stop and door-to-door** — Pareto set on (arrival, rides), checked against a CSA oracle on 1 000 random queries per city.
 - **Multiple journey options (rRAPTOR)** — a departure window (depart-at) or arrival window (arrive-by) of up to 2 h returns up to 20 options, each tagged `Fastest`, `FewestTransfers` or `LeavesLatest`.
 - **Walking on real streets** — OSM foot graph, snapping (≤ 300 m), footpaths between stops (≤ 500 m), walk-only answers up to 3 km.
@@ -70,7 +70,7 @@ Real output of `rustline plan` on the Brașov pack:
 |----------|------------|
 | Language | Rust (stable, pinned in `rust-toolchain.toml`; MSRV 1.88, `rust-version` in `Cargo.toml`); Dart for the plugin |
 | Framework | flutter_rust_bridge **2.13.0** + Cargokit (Flutter plugin) |
-| Data | GTFS feeds, OpenStreetMap `.osm.pbf` extracts, own binary pack format v4 (zstd-compressed) |
+| Data | GTFS feeds, OpenStreetMap `.osm.pbf` extracts, own binary pack format v5 (zstd-compressed; v4 packs still load) |
 | Tools | Cargo workspace, criterion benchmarks, chrono / chrono-tz, `cargo-ndk` 4.1.2, Android NDK 28.2.13676358, GitHub Actions |
 
 Rustline uses flutter_rust_bridge 2.13.0 (Rust crate, Dart package and codegen; the three versions must match) and is built and tested with Flutter 3.47.8. An app using the plugin needs Flutter 3.35.3 or newer (Dart ≥ 3.9.2), as set in `rustline_flutter/pubspec.yaml`; RoTransit (Flutter 3.27, Dart 3.6) has to upgrade Flutter before it can use this version.
@@ -180,7 +180,7 @@ Build a door-to-door pack (the area comes from the feed, never from the code) an
 BBOX=$(cargo run -q --locked --release -p rustline-cli -- bbox --gtfs fixtures/feeds/brasov-latest.zip --margin-km 2)
 cargo run --locked --release -p rustline-cli -- build-pack --gtfs fixtures/feeds/brasov-latest.zip \
   --osm fixtures/feeds/romania-260101.osm.pbf --bbox "$BBOX" --out out/ --feed-id brasov --built-at 1700000000
-cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-ad0d22ca80b0-v4.rlp \
+cargo run --locked --release -p rustline-cli -- plan --pack out/rustline-brasov-ad0d22ca80b0-v5.rlp \
   --from 45.6427,25.5887 --to 45.6579,25.6012 --at 2026-10-15T08:00 --geojson /tmp/j.geojson
 ```
 
@@ -204,7 +204,7 @@ use rustline_core::{Engine, Leg, PlanRequest, TimeSpec};
 use rustline_model::LatLon;
 use std::path::Path;
 
-let engine = Engine::open(Path::new("out/rustline-brasov-ad0d22ca80b0-v4.rlp")).expect("pack");
+let engine = Engine::open(Path::new("out/rustline-brasov-ad0d22ca80b0-v5.rlp")).expect("pack");
 let req = PlanRequest {
     from: LatLon { lat: 45.6427, lon: 25.5887 },
     to: LatLon { lat: 45.6579, lon: 25.6012 },
@@ -288,7 +288,7 @@ Rustline/
 │   ├── rustline-model/   # Shared types: LatLon, ids, GTFS time parsing, Journey/Leg
 │   ├── rustline-gtfs/    # GTFS reader, validation report, timetable/pattern builder
 │   ├── rustline-osm/     # OSM .pbf reader → walkable foot graph
-│   ├── rustline-pack/    # Pack format v4 (.rlp / .rlp.zst): write, read, validate
+│   ├── rustline-pack/    # Pack format v5 (.rlp / .rlp.zst, with shapes): write, read, validate; reads v4
 │   ├── rustline-core/    # Engine: RAPTOR, street search, PlanRequest/PlanResponse
 │   ├── rustline-ffi/     # flutter_rust_bridge API (plain-data types, install_pack)
 │   └── rustline-cli/     # `rustline` CLI: inspect, bbox, build-pack, plan
@@ -409,7 +409,7 @@ GitHub Actions workflows in `.github/workflows/`:
 15. **Tag list** – `cycleway` (and unlisted values) is walkable only with an explicit `foot` tag.
 16. **OSM order** – nodes must come before ways, else `OsmError::Unsupported`; relations are ignored.
 17. **Bbox edge** – a way leaving the bbox is cut at its last node inside.
-18. **Transit geometry** – rides are drawn stop to stop (shapes.txt unused).
+18. ~~**Transit geometry**~~ – fixed in pack v5: a ride follows its trip's shape from shapes.txt. It falls back to straight lines between the stops passed for a v4 pack, a feed without shapes.txt, or a trip whose stops lie too far from its shape.
 19. **0-ride RAPTOR results** – dropped; the direct street walk stands in.
 20. **Rounding** – footpath times are whole seconds; one-to-many walks capped by real metres while steps cost × 1.5.
 21. **Unlinked stops** – a stop > 100 m from any street uses a straight line × 1.3 and `StopNotLinkedToStreets` (Brașov: 2 stops).

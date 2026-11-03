@@ -777,6 +777,13 @@ fn inspect_pack(path: &Path, json: bool) -> Result<()> {
         rustline_core::Engine::open(path).with_context(|| format!("opening {}", path.display()))?;
     let load_ms = t0.elapsed().as_millis();
     let i = engine.info();
+    let shapes = &engine.pack().timetable().transit_shapes;
+    let (shape_count, shaped_trips) = (
+        shapes.shape_count(),
+        (0..i.trips)
+            .filter(|&t| shapes.trip_cut(t).is_some())
+            .count(),
+    );
     if json {
         let value = serde_json::json!({
             "pack": path.display().to_string(),
@@ -798,6 +805,8 @@ fn inspect_pack(path: &Path, json: bool) -> Result<()> {
             "street_nodes": i.street_nodes,
             "street_segments": i.street_segments,
             "footpaths": i.footpaths,
+            "transit_shapes": shape_count,
+            "trips_with_shape": shaped_trips,
             "load_ms": load_ms,
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -820,6 +829,10 @@ fn inspect_pack(path: &Path, json: bool) -> Result<()> {
     println!("  street nodes        {:>8}", i.street_nodes);
     println!("  street segments     {:>8}", i.street_segments);
     println!("  footpaths           {:>8}", i.footpaths);
+    println!(
+        "  transit shapes      {:>8}   ({shaped_trips} trips follow one)",
+        shape_count
+    );
     if i.street_graph {
         println!("streets     OSM {}", i.osm_sha256);
     } else {

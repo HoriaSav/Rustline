@@ -5,7 +5,7 @@
 
 use chrono::{Datelike, NaiveDate as Date};
 use rustline_pack::PackMeta;
-use rustline_pack::{TimetableData, NO_COORD};
+use rustline_pack::{TimetableData, TransitShapes, NO_COORD, NO_SHAPE};
 
 use crate::{GtfsError, Service, StopKind, Timetable};
 
@@ -94,6 +94,8 @@ pub fn try_timetable_data(tt: &Timetable) -> Result<TimetableData, GtfsError> {
     }
     data.transfer_start.push(len_u32(&data.transfer_to)?);
 
+    data.transit_shapes = transit_shapes(tt)?;
+
     // One bit per (service, day of the validity window).
     let days = (tt.valid_to - tt.valid_from).num_days() + 1;
     let days = u32::try_from(days).map_err(|_| too_large("validity window (days)"))?;
@@ -110,6 +112,72 @@ pub fn try_timetable_data(tt: &Timetable) -> Result<TimetableData, GtfsError> {
         data.service_bits.extend_from_slice(&words);
     }
     Ok(data)
+}
+
+/// `points` as deltas (the first absolute), or `None` when a step does not
+/// fit an i32 (a jump across the ±180° meridian).
+fn deltas(points: &[(i32, i32)]) -> Option<Vec<(i32, i32)>> {
+    let mut prev = (0, 0);
+    points
+        .iter()
+        .map(|&(y, x)| {
+            let d = (y.checked_sub(prev.0)?, x.checked_sub(prev.1)?);
+            prev = (y, x);
+            Some(d)
+        })
+        .collect()
+}
+
+/// The shapes, delta-coded, and each trip's stop positions in decimetres;
+/// trips with the same shape and positions share one cut. A shape whose
+/// deltas do not fit is left out, and its trips have none.
+fn transit_shapes(tt: &Timetable) -> Result<TransitShapes, GtfsError> {
+    let mut s = TransitShapes::default();
+    // Pack index of each of tt.shapes, `None` when left out.
+    let mut index = Vec::with_capacity(tt.shapes.len());
+    for points in &tt.shapes {
+        let Some(d) = deltas(points) else {
+            index.push(None);
+            continue;
+        };
+        index.push(Some(
+            u32::try_from(s.point_start.len()).map_err(|_| too_large("shapes"))?,
+        ));
+        s.point_start.push(len_u32(&s.lat)?);
+        s.lat.extend(d.iter().map(|p| p.0));
+        s.lon.extend(d.iter().map(|p| p.1));
+    }
+    // A trip's shape: its pack index and stop positions.
+    fn shape_of<'t>(index: &[Option<u32>], t: &'t crate::Trip) -> Option<(u32, &'t [f64])> {
+        let sh = t.shape.as_ref()?;
+        Some((index[sh.shape as usize]?, &sh.at_m))
+    }
+    if tt.trips.iter().all(|t| shape_of(&index, t).is_none()) {
+        return Ok(TransitShapes::default());
+    }
+    s.point_start.push(len_u32(&s.lat)?);
+    s.cut_start.push(0);
+    let mut cuts: std::collections::HashMap<(u32, Vec<u32>), u32> = Default::default();
+    for t in &tt.trips {
+        let Some((pack_shape, at_m)) = shape_of(&index, t) else {
+            s.trip_cut.push(NO_SHAPE);
+            continue;
+        };
+        // Decimetres; at_m never decreases, and neither does its rounding.
+        let dm: Vec<u32> = at_m
+            .iter()
+            .map(|m| (m * 10.0).round().clamp(0.0, f64::from(u32::MAX - 1)) as u32)
+            .collect();
+        let next = u32::try_from(cuts.len()).map_err(|_| too_large("shape cuts"))?;
+        let c = *cuts.entry((pack_shape, dm.clone())).or_insert(next);
+        if c == next {
+            s.cut_shape.push(pack_shape);
+            s.cut_dm.extend_from_slice(&dm);
+            s.cut_start.push(len_u32(&s.cut_dm)?);
+        }
+        s.trip_cut.push(c);
+    }
+    Ok(s)
 }
 
 /// True when a service runs on `date` (calendar.txt plus calendar_dates.txt).

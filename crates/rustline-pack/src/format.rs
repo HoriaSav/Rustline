@@ -7,7 +7,7 @@ use rkyv::rancor;
 use rkyv::util::AlignedVec;
 
 use crate::disk::DiskStreets;
-use crate::{PackError, TimetableData};
+use crate::{PackError, TimetableData, TransitShapes};
 
 /// First four bytes of every pack.
 pub const MAGIC: [u8; 4] = *b"RLPK";
@@ -15,7 +15,11 @@ pub const MAGIC: [u8; 4] = *b"RLPK";
 /// v2 (M2 review): CRC32 trailer added.
 /// v3 (M3): pickup/drop-off types, transfers.txt and block ids.
 /// v4 (M4): footpaths, the street graph and the OSM extract's SHA-256.
-pub const FORMAT_VERSION: u16 = 4;
+/// v5: transit shapes, in a section after the body (the body keeps the v4
+/// layout, so v4 packs still load, without shapes).
+pub const FORMAT_VERSION: u16 = 5;
+/// The oldest layout this build still reads.
+pub const OLDEST_VERSION: u16 = 4;
 /// First four bytes of a zstd frame.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 /// Default limit for the pack body (256 MiB). A tiny `.rlp.zst` can claim to
@@ -96,7 +100,9 @@ impl std::ops::Deref for Pack {
 /// `magic | format_version u16 | feed_sha256 [32] | osm_sha256 [32] | built_at i64
 /// | valid_from i32 | valid_to i32 (days since 1970-01-01) | timezone (u16 len + UTF-8)
 /// | feed_id (u16 len + UTF-8) | body_len u64 | body (rkyv archive of TimetableData)
-/// | crc32 u32`. The CRC32 covers every byte before it (header and body).
+/// | shapes_len u64 | shapes (rkyv archive of TransitShapes) | crc32 u32`.
+/// The CRC32 covers every byte before it. A v4 pack has no shapes_len and
+/// shapes; the limit on the body counts both archives together.
 pub fn write_pack(
     tt: &TimetableData,
     meta: &PackMeta,
@@ -126,6 +132,11 @@ fn write_parts(tt: &TimetableData, meta: &PackMeta, out: &mut impl Write) -> Res
     let body_len = u64::try_from(body.len()).map_err(|_| corrupt("body too large"))?;
     out.write_all(&body_len.to_le_bytes())?;
     out.write_all(&body)?;
+    let shapes =
+        rkyv::to_bytes::<rancor::Error>(&tt.transit_shapes).map_err(std::io::Error::other)?;
+    let shapes_len = u64::try_from(shapes.len()).map_err(|_| corrupt("shapes too large"))?;
+    out.write_all(&shapes_len.to_le_bytes())?;
+    out.write_all(&shapes)?;
     Ok(())
 }
 
@@ -200,21 +211,51 @@ fn read_from(input: impl Read, max_body_bytes: u64, zstd: bool) -> Result<Pack, 
     // rkyv needs the body at an aligned address, so read it straight into an
     // AlignedVec. It grows 1 MiB at a time as data arrives: the length in the
     // header is untrusted, so a tiny file can't make us allocate it up front.
-    let mut body = AlignedVec::<16>::new();
-    let mut left = body_len;
-    while left > 0 {
-        let n = left.min(1 << 20);
-        let old = body.len();
-        body.resize(old + n, 0);
-        r.fill(&mut body.as_mut_slice()[old..])?;
-        left -= n;
-    }
-
+    let body = read_aligned(&mut r, body_len)?;
+    let shapes = read_shapes(&mut r, &meta, max_body_bytes - body_len as u64)?;
     read_trailer(&mut r)?;
 
-    let timetable = rkyv::from_bytes::<TimetableData, rancor::Error>(&body)
+    let mut timetable = rkyv::from_bytes::<TimetableData, rancor::Error>(&body)
         .map_err(|e| PackError::Corrupt(format!("body: {e}")))?;
+    timetable.transit_shapes = shapes;
     Pack::new(meta, timetable)
+}
+
+/// Reads `len` bytes into an aligned buffer, as rkyv needs. It grows 1 MiB
+/// at a time as data arrives: the length is untrusted, so a tiny file can't
+/// make us allocate it up front.
+fn read_aligned<R: Read>(r: &mut CrcReader<R>, len: usize) -> Result<AlignedVec<16>, PackError> {
+    let mut buf = AlignedVec::<16>::new();
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(1 << 20);
+        let old = buf.len();
+        buf.resize(old + n, 0);
+        r.fill(&mut buf.as_mut_slice()[old..])?;
+        left -= n;
+    }
+    Ok(buf)
+}
+
+/// The transit shapes section of a v5 pack (at most `max` bytes); none for v4.
+fn read_shapes<R: Read>(
+    r: &mut CrcReader<R>,
+    meta: &PackMeta,
+    max: u64,
+) -> Result<TransitShapes, PackError> {
+    if meta.format_version < 5 {
+        return Ok(TransitShapes::default());
+    }
+    let len = u64::from_le_bytes(r.array()?);
+    if len > max {
+        return Err(PackError::Corrupt(format!(
+            "shapes of {len} bytes are truncated or larger than the {max} bytes left of the limit"
+        )));
+    }
+    let len = usize::try_from(len).map_err(|_| corrupt("shapes too large"))?;
+    let bytes = read_aligned(r, len)?;
+    rkyv::from_bytes::<TransitShapes, rancor::Error>(&bytes)
+        .map_err(|e| PackError::Corrupt(format!("shapes: {e}")))
 }
 
 /// Checks a plain `.rlp` stream without keeping it in memory: header, body
@@ -224,7 +265,7 @@ fn read_from(input: impl Read, max_body_bytes: u64, zstd: bool) -> Result<Pack, 
 pub(crate) fn verify_pack(
     input: impl Read,
     max_body_bytes: u64,
-) -> Result<(PackMeta, u64, usize), PackError> {
+) -> Result<(PackMeta, u64, usize, TransitShapes), PackError> {
     let mut r = CrcReader {
         inner: input,
         crc: crc32fast::Hasher::new(),
@@ -239,8 +280,10 @@ pub(crate) fn verify_pack(
         r.fill(&mut buf[..n])?;
         left -= n;
     }
+    // The shapes are small next to the body: they are checked in memory.
+    let shapes = read_shapes(&mut r, &meta, max_body_bytes - body_len as u64)?;
     read_trailer(&mut r)?;
-    Ok((meta, start, body_len))
+    Ok((meta, start, body_len, shapes))
 }
 
 /// A plain `.rlp` file that passed [`verify_pack_file`].
@@ -261,9 +304,10 @@ pub fn verify_pack_file(
     max_body_bytes: u64,
 ) -> Result<CheckedFile, PackError> {
     let mut file = std::fs::File::open(path)?;
-    let (meta, start, len) = verify_pack(io::BufReader::new(&mut file), max_body_bytes)?;
+    let (meta, start, len, shapes) = verify_pack(io::BufReader::new(&mut file), max_body_bytes)?;
     // range: len ≤ max_body_bytes, a u64.
     let (words, streets) = crate::disk::check_body(file, start, len as u64)?;
+    streets.check_shapes(&shapes)?;
     check_window(&meta, words)?;
     Ok(CheckedFile { meta, streets })
 }
@@ -301,7 +345,7 @@ fn read_header<R: Read>(
         return Err(PackError::BadMagic);
     }
     let version = u16::from_le_bytes(r.array()?);
-    if version != FORMAT_VERSION {
+    if !(OLDEST_VERSION..=FORMAT_VERSION).contains(&version) {
         return Err(PackError::UnsupportedVersion {
             found: version,
             supported: FORMAT_VERSION,
