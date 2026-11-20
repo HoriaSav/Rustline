@@ -16,8 +16,8 @@ mod time;
 pub use build::{add_walking, StreetInput, WalkingReport, LINK_MAX_M};
 pub use plan::{
     Itinerary, Leg, PlanError, PlanRequest, PlanResponse, Polyline, StopRef, Tag, TimeSpec,
-    Warning, DETOUR_FACTOR, EXPIRES_SOON_DAYS, MAX_ACCESS_M, MAX_RANGE_DEPARTURES, MAX_RESULTS,
-    MAX_TRANSFER_M, MAX_WALK_SPEED_MPS, MAX_WINDOW_SECS, SNAP_MAX_M, WALK_BONUS_SECS,
+    ViaStop, Warning, DETOUR_FACTOR, EXPIRES_SOON_DAYS, MAX_ACCESS_M, MAX_RANGE_DEPARTURES,
+    MAX_RESULTS, MAX_TRANSFER_M, MAX_WALK_SPEED_MPS, MAX_WINDOW_SECS, SNAP_MAX_M, WALK_BONUS_SECS,
     WALK_ONLY_MAX_M,
 };
 pub use raptor::{

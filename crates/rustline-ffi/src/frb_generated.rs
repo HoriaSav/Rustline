@@ -437,6 +437,8 @@ impl SseDecode for crate::api::FfiLeg {
                 let mut var_alightMs = <i64>::sse_decode(deserializer);
                 let mut var_alightOffsetSecs = <i32>::sse_decode(deserializer);
                 let mut var_geometry = <Vec<crate::api::FfiLatLon>>::sse_decode(deserializer);
+                let mut var_intermediateStops =
+                    <Vec<crate::api::FfiViaStop>>::sse_decode(deserializer);
                 return crate::api::FfiLeg::Transit {
                     trip_id: var_tripId,
                     route_id: var_routeId,
@@ -449,6 +451,7 @@ impl SseDecode for crate::api::FfiLeg {
                     alight_ms: var_alightMs,
                     alight_offset_secs: var_alightOffsetSecs,
                     geometry: var_geometry,
+                    intermediate_stops: var_intermediateStops,
                 };
             }
             _ => {
@@ -579,6 +582,24 @@ impl SseDecode for crate::api::FfiTimeKind {
     }
 }
 
+impl SseDecode for crate::api::FfiViaStop {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_stop = <crate::api::FfiStop>::sse_decode(deserializer);
+        let mut var_arrivalMs = <i64>::sse_decode(deserializer);
+        let mut var_arrivalOffsetSecs = <i32>::sse_decode(deserializer);
+        let mut var_departureMs = <i64>::sse_decode(deserializer);
+        let mut var_departureOffsetSecs = <i32>::sse_decode(deserializer);
+        return crate::api::FfiViaStop {
+            stop: var_stop,
+            arrival_ms: var_arrivalMs,
+            arrival_offset_secs: var_arrivalOffsetSecs,
+            departure_ms: var_departureMs,
+            departure_offset_secs: var_departureOffsetSecs,
+        };
+    }
+}
+
 impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -648,6 +669,18 @@ impl SseDecode for Vec<crate::api::FfiTag> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::FfiTag>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::FfiViaStop> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::FfiViaStop>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -887,6 +920,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::FfiLeg {
                 alight_ms,
                 alight_offset_secs,
                 geometry,
+                intermediate_stops,
             } => [
                 1.into_dart(),
                 trip_id.into_into_dart().into_dart(),
@@ -900,6 +934,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::FfiLeg {
                 alight_ms.into_into_dart().into_dart(),
                 alight_offset_secs.into_into_dart().into_dart(),
                 geometry.into_into_dart().into_dart(),
+                intermediate_stops.into_into_dart().into_dart(),
             ]
             .into_dart(),
             _ => {
@@ -1038,6 +1073,25 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FfiTimeKind> for crate::api::
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FfiViaStop {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.stop.into_into_dart().into_dart(),
+            self.arrival_ms.into_into_dart().into_dart(),
+            self.arrival_offset_secs.into_into_dart().into_dart(),
+            self.departure_ms.into_into_dart().into_dart(),
+            self.departure_offset_secs.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::FfiViaStop {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FfiViaStop> for crate::api::FfiViaStop {
+    fn into_into_dart(self) -> crate::api::FfiViaStop {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::RustlineException {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1153,6 +1207,7 @@ impl SseEncode for crate::api::FfiLeg {
                 alight_ms,
                 alight_offset_secs,
                 geometry,
+                intermediate_stops,
             } => {
                 <i32>::sse_encode(1, serializer);
                 <String>::sse_encode(trip_id, serializer);
@@ -1166,6 +1221,7 @@ impl SseEncode for crate::api::FfiLeg {
                 <i64>::sse_encode(alight_ms, serializer);
                 <i32>::sse_encode(alight_offset_secs, serializer);
                 <Vec<crate::api::FfiLatLon>>::sse_encode(geometry, serializer);
+                <Vec<crate::api::FfiViaStop>>::sse_encode(intermediate_stops, serializer);
             }
             _ => {
                 unimplemented!("");
@@ -1263,6 +1319,17 @@ impl SseEncode for crate::api::FfiTimeKind {
     }
 }
 
+impl SseEncode for crate::api::FfiViaStop {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::FfiStop>::sse_encode(self.stop, serializer);
+        <i64>::sse_encode(self.arrival_ms, serializer);
+        <i32>::sse_encode(self.arrival_offset_secs, serializer);
+        <i64>::sse_encode(self.departure_ms, serializer);
+        <i32>::sse_encode(self.departure_offset_secs, serializer);
+    }
+}
+
 impl SseEncode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1323,6 +1390,16 @@ impl SseEncode for Vec<crate::api::FfiTag> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::FfiTag>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::FfiViaStop> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::FfiViaStop>::sse_encode(item, serializer);
         }
     }
 }

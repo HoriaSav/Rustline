@@ -485,6 +485,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           alightMs: dco_decode_i_64(raw[9]),
           alightOffsetSecs: dco_decode_i_32(raw[10]),
           geometry: dco_decode_list_ffi_lat_lon(raw[11]),
+          intermediateStops: dco_decode_list_ffi_via_stop(raw[12]),
         );
       default:
         throw Exception("unreachable");
@@ -576,6 +577,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FfiViaStop dco_decode_ffi_via_stop(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return FfiViaStop(
+      stop: dco_decode_ffi_stop(arr[0]),
+      arrivalMs: dco_decode_i_64(arr[1]),
+      arrivalOffsetSecs: dco_decode_i_32(arr[2]),
+      departureMs: dco_decode_i_64(arr[3]),
+      departureOffsetSecs: dco_decode_i_32(arr[4]),
+    );
+  }
+
+  @protected
   int dco_decode_i_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
@@ -615,6 +631,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<FfiTag> dco_decode_list_ffi_tag(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_ffi_tag).toList();
+  }
+
+  @protected
+  List<FfiViaStop> dco_decode_list_ffi_via_stop(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_ffi_via_stop).toList();
   }
 
   @protected
@@ -850,6 +872,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_alightMs = sse_decode_i_64(deserializer);
         var var_alightOffsetSecs = sse_decode_i_32(deserializer);
         var var_geometry = sse_decode_list_ffi_lat_lon(deserializer);
+        var var_intermediateStops = sse_decode_list_ffi_via_stop(deserializer);
         return FfiLeg_Transit(
           tripId: var_tripId,
           routeId: var_routeId,
@@ -862,6 +885,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           alightMs: var_alightMs,
           alightOffsetSecs: var_alightOffsetSecs,
           geometry: var_geometry,
+          intermediateStops: var_intermediateStops,
         );
       default:
         throw UnimplementedError('');
@@ -970,6 +994,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FfiViaStop sse_decode_ffi_via_stop(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_stop = sse_decode_ffi_stop(deserializer);
+    var var_arrivalMs = sse_decode_i_64(deserializer);
+    var var_arrivalOffsetSecs = sse_decode_i_32(deserializer);
+    var var_departureMs = sse_decode_i_64(deserializer);
+    var var_departureOffsetSecs = sse_decode_i_32(deserializer);
+    return FfiViaStop(
+      stop: var_stop,
+      arrivalMs: var_arrivalMs,
+      arrivalOffsetSecs: var_arrivalOffsetSecs,
+      departureMs: var_departureMs,
+      departureOffsetSecs: var_departureOffsetSecs,
+    );
+  }
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getInt32();
@@ -1039,6 +1080,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <FfiTag>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_ffi_tag(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<FfiViaStop> sse_decode_list_ffi_via_stop(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <FfiViaStop>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_ffi_via_stop(deserializer));
     }
     return ans_;
   }
@@ -1284,6 +1337,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         alightMs: final alightMs,
         alightOffsetSecs: final alightOffsetSecs,
         geometry: final geometry,
+        intermediateStops: final intermediateStops,
       ):
         sse_encode_i_32(1, serializer);
         sse_encode_String(tripId, serializer);
@@ -1297,6 +1351,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_i_64(alightMs, serializer);
         sse_encode_i_32(alightOffsetSecs, serializer);
         sse_encode_list_ffi_lat_lon(geometry, serializer);
+        sse_encode_list_ffi_via_stop(intermediateStops, serializer);
     }
   }
 
@@ -1371,6 +1426,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_ffi_via_stop(FfiViaStop self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_ffi_stop(self.stop, serializer);
+    sse_encode_i_64(self.arrivalMs, serializer);
+    sse_encode_i_32(self.arrivalOffsetSecs, serializer);
+    sse_encode_i_64(self.departureMs, serializer);
+    sse_encode_i_32(self.departureOffsetSecs, serializer);
+  }
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putInt32(self);
@@ -1430,6 +1495,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_ffi_tag(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_ffi_via_stop(
+    List<FfiViaStop> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_ffi_via_stop(item, serializer);
     }
   }
 

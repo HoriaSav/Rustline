@@ -147,7 +147,21 @@ pub enum FfiLeg {
         alight_ms: i64,
         alight_offset_secs: i32,
         geometry: Vec<FfiLatLon>,
+        /// Stops passed between `from_stop` and `to_stop` (both excluded),
+        /// board → alight; empty when none.
+        intermediate_stops: Vec<FfiViaStop>,
     },
+}
+
+/// A stop passed on a transit leg, with its scheduled times (same encoding
+/// as `board_ms`/`alight_ms`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FfiViaStop {
+    pub stop: FfiStop,
+    pub arrival_ms: i64,
+    pub arrival_offset_secs: i32,
+    pub departure_ms: i64,
+    pub departure_offset_secs: i32,
 }
 
 /// A GTFS stop; `lat`/`lon` are None for a stop without coordinates.
@@ -406,6 +420,18 @@ fn stop(s: &StopRef) -> FfiStop {
     }
 }
 
+fn via(v: &rustline_core::ViaStop) -> FfiViaStop {
+    let ((arrival_ms, arrival_offset_secs), (departure_ms, departure_offset_secs)) =
+        (ms(&v.arrival), ms(&v.departure));
+    FfiViaStop {
+        stop: stop(&v.stop),
+        arrival_ms,
+        arrival_offset_secs,
+        departure_ms,
+        departure_offset_secs,
+    }
+}
+
 fn line(g: &Option<rustline_core::Polyline>) -> Vec<FfiLatLon> {
     g.as_ref()
         .map(|p| {
@@ -458,6 +484,7 @@ fn itinerary(i: &rustline_core::Itinerary) -> FfiItinerary {
                 board,
                 alight,
                 geometry,
+                intermediate_stops,
             } => {
                 let ((board_ms, board_offset_secs), (alight_ms, alight_offset_secs)) =
                     (ms(board), ms(alight));
@@ -473,6 +500,7 @@ fn itinerary(i: &rustline_core::Itinerary) -> FfiItinerary {
                     alight_ms,
                     alight_offset_secs,
                     geometry: line(geometry),
+                    intermediate_stops: intermediate_stops.iter().map(via).collect(),
                 }
             }
         })

@@ -246,3 +246,64 @@ fn a_shape_too_far_from_the_stops_gives_the_stop_line() {
     );
     assert_eq!(line, vec![ALPHA, BRAVO, CHARLIE, DELTA]);
 }
+
+/// P17: a ride from Alpha to Delta on R1_0800 passes Bravo (08:05) and
+/// Charlie (08:10), in order, with their stop_times.txt times; the boarding
+/// and alighting stops are left out, and adjacent stops give none.
+#[test]
+fn a_ride_lists_its_intermediate_stops() {
+    let (_, data, meta) = ShapedFeed::new().build();
+    let e = engine(&data, &meta);
+    let via = |from: (f64, f64), to: (f64, f64), at: &str| {
+        let r = PlanRequest {
+            from: LatLon::new(from.0, from.1),
+            to: LatLon::new(to.0, to.1),
+            time: TimeSpec::DepartAt(DateTime::parse_from_rfc3339(at).unwrap()),
+            max_access_m: 100,
+            max_results: 1,
+            ..PlanRequest::default()
+        };
+        let plan = e.plan(&r).unwrap();
+        let it = plan.itineraries.first().expect("an itinerary");
+        it.legs
+            .iter()
+            .find_map(|l| match l {
+                Leg::Transit {
+                    trip_id,
+                    intermediate_stops,
+                    ..
+                } => Some((trip_id.clone(), intermediate_stops.clone())),
+                _ => None,
+            })
+            .expect("a transit leg")
+    };
+    let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap();
+
+    let (trip, stops) = via(ALPHA, DELTA, "2030-01-02T07:55:00-05:00");
+    assert_eq!(trip, "R1_0800");
+    let got: Vec<_> = stops
+        .iter()
+        .map(|v| (v.stop.id.as_str(), v.arrival, v.departure))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                "B",
+                t("2030-01-02T08:05:00-05:00"),
+                t("2030-01-02T08:05:00-05:00")
+            ),
+            (
+                "C",
+                t("2030-01-02T08:10:00-05:00"),
+                t("2030-01-02T08:10:00-05:00")
+            ),
+        ]
+    );
+    assert_eq!(stops[0].stop.name, "Bravo");
+    assert_eq!(stops[1].stop.name, "Charlie");
+
+    let (trip, stops) = via(BRAVO, CHARLIE, "2030-01-02T08:04:00-05:00");
+    assert_eq!(trip, "R1_0800");
+    assert!(stops.is_empty(), "{stops:?}");
+}

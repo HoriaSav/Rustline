@@ -218,6 +218,31 @@ impl Polyline {
     }
 }
 
+/// A stop a transit leg passes between boarding and alighting.
+/// The times sit apart from `stop`, so dropping them later is a small diff.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViaStop {
+    /// The stop.
+    pub stop: StopRef,
+    /// Scheduled arrival.
+    pub arrival: DateTime<FixedOffset>,
+    /// Scheduled departure.
+    pub departure: DateTime<FixedOffset>,
+}
+
+/// The stops strictly between rows `a` (boarding) and `b` (alighting) of a
+/// trip's `(stop, arrival, departure)` times, shifted by `sh`, in travel
+/// order; empty when the stops are adjacent or the span is invalid.
+fn via_times(times: &[(u32, u32, u32)], a: usize, b: usize, sh: u32) -> Vec<(u32, u32, u32)> {
+    if a >= b || b > times.len() {
+        return Vec::new();
+    }
+    times[a + 1..b]
+        .iter()
+        .map(|&(s, arr, dep)| (s, arr.saturating_add(sh), dep.saturating_add(sh)))
+        .collect()
+}
+
 /// One part of an itinerary.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Leg {
@@ -257,6 +282,9 @@ pub enum Leg {
         /// The trip's shape (shapes.txt) from the boarding to the alighting
         /// stop; the stops passed, as a line, when the pack has no shape for it.
         geometry: Option<Polyline>,
+        /// Stops passed between `from_stop` and `to_stop` (both excluded),
+        /// in travel order, with scheduled times; empty when none.
+        intermediate_stops: Vec<ViaStop>,
     },
 }
 
@@ -1078,19 +1106,30 @@ impl Query<'_> {
                     rides += 1;
                     let i = trip.index();
                     approximate |= tt.trip_approximate.get(i) == Some(&1);
+                    let times = tt.trip_times(i);
+                    // The trip's own times are shifted by its day's shift.
+                    let at = |t: u32, sh: u32| t.checked_add(sh);
+                    let found = shifts.iter().find_map(|&sh| {
+                        let a = times
+                            .iter()
+                            .position(|s| s.0 == x.0 && at(s.2, sh) == Some(dep.0))?;
+                        let b = times
+                            .iter()
+                            .rposition(|s| s.0 == y.0 && at(s.1, sh) == Some(arr.0))?;
+                        (a <= b).then_some((a, b, sh))
+                    });
+                    let span = found.map(|(a, b, _)| (a, b));
+                    let intermediate_stops: Vec<ViaStop> = found
+                        .map(|(a, b, sh)| via_times(&times, a, b, sh))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(st, arr, dep)| ViaStop {
+                            stop: self.stop_ref(st),
+                            arrival: time(arr),
+                            departure: time(dep),
+                        })
+                        .collect();
                     let pts: Vec<LatLon> = {
-                        let times = tt.trip_times(i);
-                        // The trip's own times are shifted by its day's shift.
-                        let at = |t: u32, sh: u32| t.checked_add(sh);
-                        let span = shifts.iter().find_map(|&sh| {
-                            let a = times
-                                .iter()
-                                .position(|s| s.0 == x.0 && at(s.2, sh) == Some(dep.0))?;
-                            let b = times
-                                .iter()
-                                .rposition(|s| s.0 == y.0 && at(s.1, sh) == Some(arr.0))?;
-                            (a <= b).then_some((a, b))
-                        });
                         match span {
                             Some((a, b)) => self
                                 .shape_slice(i, (a, b), (times[a].0, times[b].0))
@@ -1117,6 +1156,7 @@ impl Query<'_> {
                         board: time(dep.0),
                         alight: time(arr.0),
                         geometry: (pts.len() >= 2).then_some(Polyline(pts)),
+                        intermediate_stops,
                     });
                     t = arr.0;
                 }
@@ -1143,5 +1183,40 @@ impl Query<'_> {
             tags: Vec::new(),
         };
         (it, approximate)
+    }
+}
+
+#[cfg(test)]
+mod via_tests {
+    use super::via_times;
+
+    // (stop, arrival, departure) rows of one trip.
+    const TRIP: [(u32, u32, u32); 5] = [
+        (10, 100, 110),
+        (11, 200, 210),
+        (12, 300, 330),
+        (13, 400, 400),
+        (14, 500, 510),
+    ];
+
+    #[test]
+    fn via_times_between_board_and_alight() {
+        // Board row 0, alight row 3: rows 1 and 2, shifted by 86_400.
+        assert_eq!(
+            via_times(&TRIP, 0, 3, 86_400),
+            vec![(11, 86_600, 86_610), (12, 86_700, 86_730)]
+        );
+        assert_eq!(
+            via_times(&TRIP, 0, 4, 0),
+            vec![(11, 200, 210), (12, 300, 330), (13, 400, 400)]
+        );
+    }
+
+    #[test]
+    fn via_times_empty_for_adjacent_or_bad_span() {
+        assert!(via_times(&TRIP, 1, 2, 0).is_empty());
+        assert!(via_times(&TRIP, 2, 2, 0).is_empty());
+        assert!(via_times(&TRIP, 3, 1, 0).is_empty());
+        assert!(via_times(&TRIP, 0, 9, 0).is_empty());
     }
 }

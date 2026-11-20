@@ -45,6 +45,7 @@ mixin _$FfiLeg {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )
     transit,
   }) => throw _privateConstructorUsedError;
@@ -73,6 +74,7 @@ mixin _$FfiLeg {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )?
     transit,
   }) => throw _privateConstructorUsedError;
@@ -101,6 +103,7 @@ mixin _$FfiLeg {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )?
     transit,
     required TResult orElse(),
@@ -366,6 +369,7 @@ class _$FfiLeg_WalkImpl extends FfiLeg_Walk {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )
     transit,
   }) {
@@ -407,6 +411,7 @@ class _$FfiLeg_WalkImpl extends FfiLeg_Walk {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )?
     transit,
   }) {
@@ -448,6 +453,7 @@ class _$FfiLeg_WalkImpl extends FfiLeg_Walk {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )?
     transit,
     required TResult orElse(),
@@ -553,6 +559,7 @@ abstract class _$$FfiLeg_TransitImplCopyWith<$Res>
     int alightMs,
     int alightOffsetSecs,
     List<FfiLatLon> geometry,
+    List<FfiViaStop> intermediateStops,
   });
 }
 
@@ -581,6 +588,7 @@ class __$$FfiLeg_TransitImplCopyWithImpl<$Res>
     Object? alightMs = null,
     Object? alightOffsetSecs = null,
     Object? geometry = null,
+    Object? intermediateStops = null,
   }) {
     return _then(
       _$FfiLeg_TransitImpl(
@@ -628,6 +636,10 @@ class __$$FfiLeg_TransitImplCopyWithImpl<$Res>
             ? _value._geometry
             : geometry // ignore: cast_nullable_to_non_nullable
                   as List<FfiLatLon>,
+        intermediateStops: null == intermediateStops
+            ? _value._intermediateStops
+            : intermediateStops // ignore: cast_nullable_to_non_nullable
+                  as List<FfiViaStop>,
       ),
     );
   }
@@ -648,7 +660,9 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
     required this.alightMs,
     required this.alightOffsetSecs,
     required final List<FfiLatLon> geometry,
+    required final List<FfiViaStop> intermediateStops,
   }) : _geometry = geometry,
+       _intermediateStops = intermediateStops,
        super._();
 
   @override
@@ -679,9 +693,23 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
     return EqualUnmodifiableListView(_geometry);
   }
 
+  /// Stops passed between `from_stop` and `to_stop` (both excluded),
+  /// board → alight; empty when none.
+  final List<FfiViaStop> _intermediateStops;
+
+  /// Stops passed between `from_stop` and `to_stop` (both excluded),
+  /// board → alight; empty when none.
+  @override
+  List<FfiViaStop> get intermediateStops {
+    if (_intermediateStops is EqualUnmodifiableListView)
+      return _intermediateStops;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_intermediateStops);
+  }
+
   @override
   String toString() {
-    return 'FfiLeg.transit(tripId: $tripId, routeId: $routeId, routeName: $routeName, headsign: $headsign, fromStop: $fromStop, toStop: $toStop, boardMs: $boardMs, boardOffsetSecs: $boardOffsetSecs, alightMs: $alightMs, alightOffsetSecs: $alightOffsetSecs, geometry: $geometry)';
+    return 'FfiLeg.transit(tripId: $tripId, routeId: $routeId, routeName: $routeName, headsign: $headsign, fromStop: $fromStop, toStop: $toStop, boardMs: $boardMs, boardOffsetSecs: $boardOffsetSecs, alightMs: $alightMs, alightOffsetSecs: $alightOffsetSecs, geometry: $geometry, intermediateStops: $intermediateStops)';
   }
 
   @override
@@ -705,7 +733,11 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
                 other.alightMs == alightMs) &&
             (identical(other.alightOffsetSecs, alightOffsetSecs) ||
                 other.alightOffsetSecs == alightOffsetSecs) &&
-            const DeepCollectionEquality().equals(other._geometry, _geometry));
+            const DeepCollectionEquality().equals(other._geometry, _geometry) &&
+            const DeepCollectionEquality().equals(
+              other._intermediateStops,
+              _intermediateStops,
+            ));
   }
 
   @override
@@ -722,6 +754,7 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
     alightMs,
     alightOffsetSecs,
     const DeepCollectionEquality().hash(_geometry),
+    const DeepCollectionEquality().hash(_intermediateStops),
   );
 
   /// Create a copy of FfiLeg
@@ -761,6 +794,7 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )
     transit,
   }) {
@@ -776,6 +810,7 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
       alightMs,
       alightOffsetSecs,
       geometry,
+      intermediateStops,
     );
   }
 
@@ -805,6 +840,7 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )?
     transit,
   }) {
@@ -820,6 +856,7 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
       alightMs,
       alightOffsetSecs,
       geometry,
+      intermediateStops,
     );
   }
 
@@ -849,6 +886,7 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
       int alightMs,
       int alightOffsetSecs,
       List<FfiLatLon> geometry,
+      List<FfiViaStop> intermediateStops,
     )?
     transit,
     required TResult orElse(),
@@ -866,6 +904,7 @@ class _$FfiLeg_TransitImpl extends FfiLeg_Transit {
         alightMs,
         alightOffsetSecs,
         geometry,
+        intermediateStops,
       );
     }
     return orElse();
@@ -916,6 +955,7 @@ abstract class FfiLeg_Transit extends FfiLeg {
     required final int alightMs,
     required final int alightOffsetSecs,
     required final List<FfiLatLon> geometry,
+    required final List<FfiViaStop> intermediateStops,
   }) = _$FfiLeg_TransitImpl;
   const FfiLeg_Transit._() : super._();
 
@@ -933,6 +973,10 @@ abstract class FfiLeg_Transit extends FfiLeg {
   int get alightOffsetSecs;
   @override
   List<FfiLatLon> get geometry;
+
+  /// Stops passed between `from_stop` and `to_stop` (both excluded),
+  /// board → alight; empty when none.
+  List<FfiViaStop> get intermediateStops;
 
   /// Create a copy of FfiLeg
   /// with the given fields replaced by the non-null parameter values.

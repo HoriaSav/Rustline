@@ -8,8 +8,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `copy_and_check`, `core_request`, `count`, `days`, `fail`, `free_space`, `guard`, `header_info`, `injected_flock_error`, `install`, `io_error`, `is_own_tmp`, `itinerary`, `line`, `lock`, `ms`, `pack_error`, `pack_info`, `plan_error`, `quiet_panics`, `stop`, `warning`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `copy_and_check`, `core_request`, `count`, `days`, `fail`, `free_space`, `guard`, `header_info`, `injected_flock_error`, `install`, `io_error`, `is_own_tmp`, `itinerary`, `line`, `lock`, `ms`, `pack_error`, `pack_info`, `plan_error`, `quiet_panics`, `stop`, `via`, `warning`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseExplicitAttribute): `debug_flock_fail`, `install_pack_with_free_space`
 
 /// Installs a downloaded `.rlp.zst` at `dest`. Holds an exclusive lock on
@@ -159,6 +159,10 @@ sealed class FfiLeg with _$FfiLeg {
     required PlatformInt64 alightMs,
     required int alightOffsetSecs,
     required List<FfiLatLon> geometry,
+
+    /// Stops passed between `from_stop` and `to_stop` (both excluded),
+    /// board → alight; empty when none.
+    required List<FfiViaStop> intermediateStops,
   }) = FfiLeg_Transit;
 }
 
@@ -350,6 +354,43 @@ enum FfiTag { fastest, fewestTransfers, leavesLatest }
 
 /// When `time_ms` is: leave then, or arrive by then (M8).
 enum FfiTimeKind { departAt, arriveBy }
+
+/// A stop passed on a transit leg, with its scheduled times (same encoding
+/// as `board_ms`/`alight_ms`).
+class FfiViaStop {
+  final FfiStop stop;
+  final PlatformInt64 arrivalMs;
+  final int arrivalOffsetSecs;
+  final PlatformInt64 departureMs;
+  final int departureOffsetSecs;
+
+  const FfiViaStop({
+    required this.stop,
+    required this.arrivalMs,
+    required this.arrivalOffsetSecs,
+    required this.departureMs,
+    required this.departureOffsetSecs,
+  });
+
+  @override
+  int get hashCode =>
+      stop.hashCode ^
+      arrivalMs.hashCode ^
+      arrivalOffsetSecs.hashCode ^
+      departureMs.hashCode ^
+      departureOffsetSecs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FfiViaStop &&
+          runtimeType == other.runtimeType &&
+          stop == other.stop &&
+          arrivalMs == other.arrivalMs &&
+          arrivalOffsetSecs == other.arrivalOffsetSecs &&
+          departureMs == other.departureMs &&
+          departureOffsetSecs == other.departureOffsetSecs;
+}
 
 /// An error with a stable code; thrown as `RustlineException` in Dart.
 class RustlineException implements FrbException {
